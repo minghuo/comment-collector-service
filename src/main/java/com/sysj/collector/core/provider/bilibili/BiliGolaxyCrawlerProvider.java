@@ -1,34 +1,38 @@
 package com.sysj.collector.core.provider.bilibili;
 
-
 import cn.hutool.core.collection.CollUtil;
 import com.bewilder.parser.CommonParser;
 import com.bewilder.tools.CommonTools;
 import com.sysj.collector.constants.GolaxyConstants;
-
+import com.sysj.collector.core.provider.support.ProviderUrls;
 import com.sysj.collector.core.provider.CommentProvider;
-
 import com.sysj.collector.model.Comment;
-
 import com.sysj.collector.model.CommentCollectRequest;
-
 import com.sysj.collector.model.CommonEntity;
-
 import com.sysj.collector.model.CommonStatusEnum;
-
 import com.sysj.http.HttpUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
+
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-
 
 /**
  * B站 - 中科天玑接口供应商。
  *
- * <p>Bean 名称 = "bilibili_golaxy"。
- * 频次由 DB 配置驱动（示例：1.0 req/s）。
+ * <p>Bean 名称 = {@code bilibili_golaxy}。
+ *
+ * <p>实现对照 {@code auto-task-web} 的 {@code BiliGolaxyCrawler}：
+ * 内部失败重试 3 次（每次间隔 1s），游标型翻页，字段解析走 {@link Comment#buildFromGolaxy(String)}。
+ *
+ * <h3>入参（{@code request.extra}）</h3>
+ * <ul>
+ *   <li>{@code mid} —— 视频 id；为空时回退 {@code request.targetId}（必填）</li>
+ *   <li>{@code cursor} —— 上一页返回的游标，首次不传（<b>不传</b>，避免拼出 {@code cursor=null}）</li>
+ *   <li>{@code commentId} —— 父评论 id，传了则采子评论</li>
+ * </ul>
  */
 @Slf4j
 @Component("bilibili_golaxy")
@@ -36,84 +40,83 @@ public class BiliGolaxyCrawlerProvider implements CommentProvider {
 
     private static final HttpUtil httpUtil = new HttpUtil.Builder().build();
 
+    private static final int RETRY = 3;
+
     @Override
-    public String providerKey() { return "bilibili_golaxy"; }
+    public String providerKey() {
+        return "bilibili_golaxy";
+    }
 
     @Override
     public CommonEntity<Comment> fetchComments(CommentCollectRequest request) {
-        log.info("[Bili-Golaxy] 采集开始: targetId={}", request.getTargetId());
-        Map<String, String> extra = request.getExtra();
-        String mid = extra.get("mid");
+        Map<String, String> extra = request.getExtra() == null ? Map.of() : request.getExtra();
+        String mid = ProviderUrls.resolveMid(extra.get("mid"), request.getFromUrl(), request.getTargetId());
         String commentId = extra.get("commentId");
         String cursor = extra.get("cursor");
-        if(StringUtils.isNotBlank(commentId)){
-            return getCommentChild(mid, commentId, cursor);
+        log.info("[bili-golaxy] 采集开始: mid={} commentId={} cursor={}", mid, commentId, cursor);
+
+        if (StringUtils.isBlank(mid)) {
+            return CommonEntity.<Comment>builder().haseMore(false)
+                    .status(CommonStatusEnum.STATUS_PARAM).build();
         }
-        return getComment(mid, cursor);
+        String apiUrl;
+        if (StringUtils.isNotBlank(commentId)) {
+            apiUrl = String.format("%s/reply/bilibili/v2?apiKey=%s&video_id=%s&comment_id=%s",
+                    GolaxyConstants.COMMENT_BASE_URL, GolaxyConstants.COMMENT_API_KEY, mid, commentId);
+        } else {
+            apiUrl = String.format("%s/bilibili?apiKey=%s&video_id=%s",
+                    GolaxyConstants.COMMENT_BASE_URL, GolaxyConstants.COMMENT_API_KEY, mid);
+        }
+        if (StringUtils.isNotBlank(cursor)) {
+            apiUrl = apiUrl + "&cursor=" + cursor;
+        }
+        return fetch(apiUrl);
     }
 
     /**
-     * 获取评论
-     * @param mid  视频id
-     * @param cursor 下一页参数
-     * @return CommonEntity<Comment>
+     * 统一的取数 + 解析逻辑（主评论与子评论共用，仅 URL 不同）。
      */
-    private CommonEntity<Comment> getComment(String mid, String cursor) {
-        String apiUrl = String.format("%s/bilibili?apiKey=%s&video_id=%s&cursor=%s",
-                GolaxyConstants.COMMENT_BASE_URL, GolaxyConstants.COMMENT_API_KEY, mid, cursor);
-        boolean haseMore = false;
-        try{
-            String body = httpUtil.getString(apiUrl, false);
-            if(StringUtils.isNotBlank(body) && body.contains("comments")){
-                int totalPage = CommonTools.totalPage(CommonTools.stringToInteger(CommonParser.getJsonPathOne(body, "$.total")), 20);
-                List<Comment> comments = CollUtil.newArrayList();
-                haseMore = "1".equals(CommonParser.getJsonPathOne(body, "$.has_more"));
-                cursor = CommonParser.getJsonPathOne(body, "$.cursor");
-                List<String> commentStrList = CommonParser.getJsonPathMany(body, "$.comments");
-                if(CollUtil.isNotEmpty(commentStrList)){
-                    for(String commentStr : commentStrList){
-                        comments.add(Comment.buildFromGolaxy(commentStr));
+    private CommonEntity<Comment> fetch(String apiUrl) {
+        for (int i = 0; i < RETRY; i++) {
+            try {
+                String body = httpUtil.getString(apiUrl, false);
+                if (StringUtils.isNotBlank(body) && body.contains("comments")) {
+                    // 上游用 code != 200 表达失败（如 {"code":500,"message":"获取评论信息失败, 请重试"}），
+                    // 此时不能当成"成功但无数据"，否则会被误判为 SUCCESS，既不重试也不切换供应商。
+                    String upstreamCodeStr = CommonParser.getJsonPathOne(body, "$.code");
+                    if (StringUtils.isNotBlank(upstreamCodeStr)) {
+                        Integer upstreamCode = CommonTools.stringToInteger(upstreamCodeStr);
+                        if (upstreamCode != null && upstreamCode != 200) {
+                            log.warn("{} 上游返回失败: code={} message={}", providerKey(), upstreamCode,
+                                    CommonParser.getJsonPathOne(body, "$.message"));
+                            CommonTools.sleep(1000);
+                            continue;
+                        }
                     }
-                    return CommonEntity.<Comment>builder().haseMore(haseMore).totalPage(totalPage).nextUrl(cursor).status(CommonStatusEnum.STATUS_SUCCESS).dataList(comments).build();
-                }
-            }
-        }catch (Exception e){
-            log.error("b站 getComment error", e);
-        }
-        return CommonEntity.<Comment>builder().haseMore(haseMore).status(CommonStatusEnum.STATUS_ERROR).build();
-    }
-
-
-    /**
-     * 获取子评论
-     * @param mid  视频id
-     * @param commentId 父评论id
-     * @param cursor 下一页参数
-     * @return CommonEntity<Comment>
-     */
-    private static CommonEntity<Comment> getCommentChild(String mid, String commentId, String cursor) {
-        String apiUrl = String.format("%s/reply/bilibili/v2?apiKey=%s&video_id=%s&comment_id=%s&cursor=%s",
-                GolaxyConstants.COMMENT_BASE_URL, GolaxyConstants.COMMENT_API_KEY, mid, commentId, cursor);
-        boolean haseMore = false;
-        try{
-            String body = httpUtil.getString(apiUrl, false);
-            if(StringUtils.isNotBlank(body) && body.contains("comments")){
-                int totalPage = CommonTools.totalPage(CommonTools.stringToInteger(CommonParser.getJsonPathOne(body, "$.total")), 20);
-                List<Comment> comments = CollUtil.newArrayList();
-                haseMore = "1".equals(CommonParser.getJsonPathOne(body, "$.has_more"));
-                cursor = CommonParser.getJsonPathOne(body, "$.cursor");
-                List<String> commentStrList = CommonParser.getJsonPathMany(body, "$.comments");
-                if(CollUtil.isNotEmpty(commentStrList)){
-                    for(String commentStr : commentStrList){
-                        comments.add(Comment.buildFromGolaxy(commentStr));
+                    String nextCursor = CommonParser.getJsonPathOne(body, "$.cursor");
+                    boolean hasMore = "1".equals(CommonParser.getJsonPathOne(body, "$.has_more"));
+                    Integer totalPage = CommonTools.totalPage(
+                            CommonTools.stringToInteger(CommonParser.getJsonPathOne(body, "$.total")), 20);
+                    List<String> commentStrList = CommonParser.getJsonPathMany(body, "$.comments");
+                    List<Comment> comments = new ArrayList<>();
+                    if (CollUtil.isNotEmpty(commentStrList)) {
+                        for (String commentStr : commentStrList) {
+                            comments.add(Comment.buildFromGolaxy(commentStr));
+                        }
                     }
+                    return CommonEntity.<Comment>builder()
+                            .haseMore(hasMore)
+                            .nextUrl(nextCursor)
+                            .totalPage(totalPage)
+                            .status(CommonStatusEnum.STATUS_SUCCESS)
+                            .dataList(comments)
+                            .build();
                 }
-                return CommonEntity.<Comment>builder().haseMore(haseMore).nextUrl(cursor).totalPage(totalPage).status(CommonStatusEnum.STATUS_SUCCESS).dataList(comments).build();
+            } catch (Exception e) {
+                log.warn("[bili-golaxy] 第 {}/{} 次请求失败: {}", i + 1, RETRY, e.getMessage());
             }
-        }catch (Exception e){
-            log.error("b站 child getComment error", e);
+            CommonTools.sleep(1000);
         }
-        return CommonEntity.<Comment>builder().haseMore(haseMore).status(CommonStatusEnum.STATUS_ERROR).build();
+        return CommonEntity.<Comment>builder().haseMore(false).status(CommonStatusEnum.STATUS_ERROR).build();
     }
-
 }

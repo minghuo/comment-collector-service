@@ -6,7 +6,7 @@ import com.sysj.collector.core.ratelimit.ProviderRateLimitManager;
 import com.sysj.collector.domain.document.PlatformFeatureConfig;
 import com.sysj.collector.domain.document.PlatformFeatureConfig.ProviderConfig;
 import com.sysj.collector.domain.document.SupplierState;
-import com.sysj.collector.domain.repository.SupplierStateRepository;
+import com.sysj.collector.domain.dao.SupplierStateDao;
 
 import com.sysj.collector.domain.document.UserTierConfig.FeatureProviderConfig;
 
@@ -45,7 +45,7 @@ import java.util.stream.Collectors;
 public class DynamicProviderRouter {
 
     private final ProviderRateLimitManager rateLimitManager;
-    private final SupplierStateRepository supplierStateRepository;
+    private final SupplierStateDao supplierStateDao;
 
     /** platformCode:featureCode → 待处理任务计数 */
     private final ConcurrentHashMap<String, AtomicInteger> pendingCountMap = new ConcurrentHashMap<>();
@@ -222,7 +222,7 @@ public class DynamicProviderRouter {
                                      String providerKey) {
         try {
             String key = PlatformFeatureConfig.buildStateKey(platformCode, featureCode, providerKey);
-            SupplierState state = supplierStateRepository.findBySupplierKey(key)
+            SupplierState state = supplierStateDao.findBySupplierKey(key)
                     .orElseGet(() -> {
                         SupplierState s = new SupplierState();
                         s.setSupplierKey(key);
@@ -235,7 +235,7 @@ public class DynamicProviderRouter {
                     (state.getConsecutiveFailures() == null ? 0 : state.getConsecutiveFailures()) + 1);
             state.setLastFailureTime(java.time.Instant.now());
             state.setHealthStatus("DOWN");
-            supplierStateRepository.save(state);
+            supplierStateDao.save(state);
         } catch (Exception e) {
             log.warn("更新供应商失败状态异常(非关键): provider={}", providerKey, e);
         }

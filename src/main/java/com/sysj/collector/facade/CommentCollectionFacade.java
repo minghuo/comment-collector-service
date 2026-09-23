@@ -3,6 +3,9 @@ package com.sysj.collector.facade;
 import com.sysj.collector.core.provider.CommentProvider;
 import com.sysj.collector.core.router.DynamicProviderRouter;
 import com.sysj.collector.core.router.RetryableProviderExecutor;
+import com.sysj.collector.domain.dao.CommentDao;
+import com.sysj.collector.domain.document.CommentDataType;
+import com.sysj.collector.domain.document.CommentDoc;
 import com.sysj.collector.domain.document.PlatformFeatureConfig;
 import com.sysj.collector.domain.document.PlatformFeatureConfig.ProviderConfig;
 import com.sysj.collector.domain.document.UserTierConfig;
@@ -14,6 +17,7 @@ import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommentCollectResult;
 import com.sysj.collector.model.CommonEntity;
+import com.sysj.collector.model.CommonStatusEnum;
 
 import jakarta.annotation.PreDestroy;
 
@@ -66,6 +70,7 @@ public class CommentCollectionFacade {
     private final DynamicProviderRouter router;
     private final ApplicationContext applicationContext;
     private final TaskMetrics taskMetrics;
+    private final CommentDao commentDao;
 
     /** 按有效优先级排序的异步任务队列 */
     private final PriorityBlockingQueue<PrioritizedTask> taskQueue =
@@ -88,11 +93,13 @@ public class CommentCollectionFacade {
     public CommentCollectionFacade(ProviderConfigService configService,
                                    DynamicProviderRouter router,
                                    ApplicationContext applicationContext,
-                                   TaskMetrics taskMetrics) {
+                                   TaskMetrics taskMetrics,
+                                   CommentDao commentDao) {
         this.configService = configService;
         this.router = router;
         this.applicationContext = applicationContext;
         this.taskMetrics = taskMetrics;
+        this.commentDao = commentDao;
         this.asyncExecutor = Executors.newFixedThreadPool(
                 Runtime.getRuntime().availableProcessors() * 2,
                 r -> new Thread(r, "collector-async-" + System.nanoTime()));
@@ -144,8 +151,9 @@ public class CommentCollectionFacade {
         for (int i = 0; i < threads; i++) {
             asyncExecutor.submit(() -> {
                 while (!Thread.currentThread().isInterrupted()) {
+                    PrioritizedTask task = null;
                     try {
-                        PrioritizedTask task = consumeWithFairQuota();
+                        task = consumeWithFairQuota();
                         if (task != null) {
                             enqueueTimeMap.remove(task);
                             taskMetrics.setQueueSize(taskQueue.size());
@@ -160,7 +168,12 @@ public class CommentCollectionFacade {
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
                     } catch (Exception e) {
+                        // 必须让 future 异常完成，否则调用方（含 TaskRecoveryService / 任务完成回调）会永久阻塞
                         log.error("异步任务执行异常", e);
+                        if (task != null) {
+                            taskMetrics.recordTaskFailed();
+                            task.future().completeExceptionally(e);
+                        }
                     }
                 }
             });
@@ -292,6 +305,7 @@ public class CommentCollectionFacade {
 
             // 6. 遍历候选供应商并执行，失败时自动切换
             Set<String> excludedKeys = new HashSet<>();
+            Map<String, String> providerErrors = new LinkedHashMap<>();
             for (ProviderConfig providerConfig : available) {
                 String key = providerConfig.getProviderKey();
                 if (excludedKeys.contains(key)) continue;
@@ -301,12 +315,13 @@ public class CommentCollectionFacade {
                         key, providerConfig.getRatePerSecond());
                 if (!acquired) {
                     log.warn("供应商限流跳过: key={}", key);
+                    providerErrors.put(key, "限流未获取到令牌");
                     continue;
                 }
 
                 // 执行（含重试）
                 CommentCollectResult result = executeProviderWithSwitch(
-                        request, providerConfig, available, excludedKeys);
+                        request, providerConfig, available, excludedKeys, providerErrors);
 
                 if (result != null && result.isSuccess()) {
                     return result;
@@ -315,7 +330,7 @@ public class CommentCollectionFacade {
                 excludedKeys.add(key);
             }
 
-            return CommentCollectResult.failed("所有供应商均不可用");
+            return CommentCollectResult.failed("所有供应商均不可用: " + providerErrors);
 
         } finally {
             router.decrementPending(platform, feature);
@@ -325,12 +340,15 @@ public class CommentCollectionFacade {
     /**
      * 执行单个供应商，失败时记录排除。
      * 返回 null 表示需要切换供应商，返回非 null 为最终结果。
+     *
+     * @param providerErrors 失败原因收集器（key → 原因），用于最终失败信息里带出真实原因
      */
     private CommentCollectResult executeProviderWithSwitch(
             CommentCollectRequest request,
             ProviderConfig providerConfig,
             List<ProviderConfig> allAvailable,
-            Set<String> excludedKeys) {
+            Set<String> excludedKeys,
+            Map<String, String> providerErrors) {
 
         String key = providerConfig.getProviderKey();
         CommentProvider provider;
@@ -338,6 +356,7 @@ public class CommentCollectionFacade {
             provider = applicationContext.getBean(key, CommentProvider.class);
         } catch (Exception e) {
             log.error("供应商 Bean 未找到: providerKey={}", key);
+            providerErrors.put(key, "Bean 未注册");
             excludedKeys.add(key);
             return null; // 切换供应商
         }
@@ -346,14 +365,12 @@ public class CommentCollectionFacade {
             CommonEntity<Comment> result =
                     RetryableProviderExecutor.execute(provider, request, providerConfig.getMaxRetry());
 
-            return CommentCollectResult.builder()
-                    .success(true)
-                    .providerUsed(key)
-                    .comments(result.getDataList() != null ? result.getDataList() : java.util.Collections.emptyList())
-                    .build();
+            return toResult(request, key, result);
 
         } catch (Exception e) {
             log.error("供应商执行失败，切换: provider={} error={}", key, e.getMessage());
+
+            providerErrors.put(key, e.getMessage());
 
             // 标记该供应商失败，路由器后续将跳过
             excludedKeys.add(key);
@@ -402,14 +419,72 @@ public class CommentCollectionFacade {
             CommonEntity<Comment> result =
                     RetryableProviderExecutor.execute(provider, request, providerConfig.getMaxRetry());
 
-            return CommentCollectResult.builder()
-                    .success(true)
-                    .providerUsed(key)
-                    .comments(result.getDataList() != null ? result.getDataList() : java.util.Collections.emptyList())
-                    .build();
+            return toResult(request, key, result);
 
         } catch (Exception e) {
             return CommentCollectResult.failed("供应商 [" + key + "] 执行失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 统一的结果处理：判定成败 → 落库 → 组装返回。
+     *
+     * <p><b>失败判定口径（重要）</b>：供应商实现按约定有两种失败表达方式 ——
+     * ① 抛异常；② 返回 {@code status != STATUS_SUCCESS}。二者都必须被识别为失败，
+     * 否则会出现"不重试、不切换、还返回 success=true + 空列表"的错误行为。
+     * 这里统一抛出 {@link CollectorException}，由调用方按失败处理（触发重试或供应商切换）。
+     */
+    private CommentCollectResult toResult(CommentCollectRequest request, String providerKey,
+                                          CommonEntity<Comment> entity) {
+        if (entity == null) {
+            throw new CollectorException("供应商 [" + providerKey + "] 返回 null");
+        }
+        if (entity.getStatus() != CommonStatusEnum.STATUS_SUCCESS) {
+            throw new CollectorException("供应商 [" + providerKey + "] 返回失败状态: " + entity.getStatus()
+                    + (entity.getMsg() == null ? "" : " / " + entity.getMsg()));
+        }
+        List<Comment> comments = entity.getDataList() == null ? Collections.emptyList() : entity.getDataList();
+        persist(request, providerKey, comments);
+        return CommentCollectResult.builder()
+                .success(true)
+                .providerUsed(providerKey)
+                .comments(comments)
+                .hasMore(Boolean.TRUE.equals(entity.getHaseMore()))
+                .nextCursor(entity.getNextUrl())
+                .build();
+    }
+
+    /**
+     * 落库采集结果。
+     *
+     * <p>仅在 {@code request.taskId} 非空时落库 —— 目的是为"不能即时返回"以及
+     * "需要持续翻页"的任务提供数据返回支持（{@code GET /api/tasks/{taskId}/comments}）。
+     * 纯同步即时返回的场景不必落库。
+     *
+     * <p>落库失败只记日志，不影响本次结果返回。
+     *
+     * @return 实际写入条数
+     */
+    private int persist(CommentCollectRequest request, String providerKey, List<Comment> comments) {
+        String taskId = request.getTaskId();
+        if (taskId == null || taskId.isBlank() || comments.isEmpty()) {
+            return 0;
+        }
+        String dataType = CommentDataType.of(request.getPlatformCode(), request.getFeatureCode());
+        String fromUrl = request.getFromUrl();
+        List<CommentDoc> docs = new ArrayList<>(comments.size());
+        for (Comment c : comments) {
+            docs.add(CommentDoc.from(dataType, request.getPlatformCode(), providerKey,
+                    taskId, request.getSubTaskId(), fromUrl, c));
+        }
+        try {
+            int saved = commentDao.saveAll(docs);
+            log.info("采集结果已落库: taskId={} subTaskId={} dataType={} provider={} saved={}/{}",
+                    taskId, request.getSubTaskId(), dataType, providerKey, saved, comments.size());
+            return saved;
+        } catch (Exception e) {
+            log.error("采集结果落库失败（不影响本次返回）: taskId={} error={}", taskId, e.getMessage(), e);
+            return 0;
         }
     }
 

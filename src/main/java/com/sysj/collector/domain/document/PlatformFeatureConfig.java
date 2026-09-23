@@ -20,23 +20,25 @@ import java.util.List;
  * <p>健康状态（{@code isHealthy}）由运维直接修改 MongoDB 文档，
  * 不做程序探测；修改后通过缓存 TTL（60s）或手动调用刷新接口生效。
  *
+ * <p><b>字段命名</b>：应用启用了 {@code SnakeCaseFieldNamingStrategy}，
+ * 因此下列 Java 字段在 MongoDB 中<b>以下划线式存储</b>；注释中的 JSON 示例即落库形态。
+ *
  * <pre>
  * {
- *   "_id": ObjectId("..."),
- *   "platformCode": "weibo",
- *   "featureCode": "comment",
- *   "featureName": "微博评论采集",
+ *   "_id": "ObjectId(...)",
+ *   "platform_code": "weibo",
+ *   "feature_code": "comment",
+ *   "feature_name": "微博评论采集",
  *   "status": true,
  *   "providers": [
  *     {
- *       "providerKey": "local_crawler",
+ *       "provider_key": "local_crawler",
  *       "name": "本地爬虫",
- *       "ratePerSecond": 0.5,
- *       "maxRetry": 1,
+ *       "rate_per_second": 0.5,
+ *       "max_retry": 1,
  *       "priority": 10,
- *       "isHealthy": true
- *     },
- *     ...
+ *       "is_healthy": true
+ *     }
  *   ]
  * }
  * </pre>
@@ -44,7 +46,8 @@ import java.util.List;
 @Data
 @Document(collection = "platform_feature_config")
 @CompoundIndexes({
-        @CompoundIndex(name = "idx_platform_feature", def = "{'platformCode': 1, 'featureCode': 1}", unique = true)
+        // def 中的字段名不会经过命名策略，必须写落库名（下划线式）
+        @CompoundIndex(name = "idx_platform_feature", def = "{'platform_code': 1, 'feature_code': 1}", unique = true)
 })
 public class PlatformFeatureConfig {
 

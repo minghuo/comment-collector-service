@@ -2,8 +2,8 @@ package com.sysj.collector.domain.service;
 
 import com.sysj.collector.domain.document.MasterTask;
 import com.sysj.collector.domain.document.SubTask;
-import com.sysj.collector.domain.repository.MasterTaskRepository;
-import com.sysj.collector.domain.repository.SubTaskRepository;
+import com.sysj.collector.domain.dao.MasterTaskDao;
+import com.sysj.collector.domain.dao.SubTaskDao;
 import com.sysj.collector.facade.CommentCollectionFacade;
 import com.sysj.collector.model.CommentCollectRequest;
 import lombok.RequiredArgsConstructor;
@@ -12,9 +12,7 @@ import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
-import java.util.HashMap;
 import java.util.List;
-import java.util.Objects;
 
 /**
  * 断点续采服务。
@@ -27,8 +25,8 @@ import java.util.Objects;
 @RequiredArgsConstructor
 public class TaskRecoveryService {
 
-    private final MasterTaskRepository masterTaskRepository;
-    private final SubTaskRepository subTaskRepository;
+    private final MasterTaskDao masterTaskDao;
+    private final SubTaskDao subTaskDao;
     private final TaskManagementService taskManagementService;
     private final CommentCollectionFacade collectionFacade;
 
@@ -40,34 +38,26 @@ public class TaskRecoveryService {
         log.info("=== 断点续采扫描开始 ===");
 
         // 1. 扫描未完成的主任务
-        List<MasterTask> pendingTasks = masterTaskRepository.findByStatus("ACTIVE");
-        pendingTasks.addAll(masterTaskRepository.findByStatus("PENDING"));
+        List<MasterTask> pendingTasks = masterTaskDao.findByStatus("ACTIVE");
+        pendingTasks.addAll(masterTaskDao.findByStatus("PENDING"));
 
         int totalRecovered = 0;
 
         for (MasterTask task : pendingTasks) {
             // 2. 扫描该任务下未完成的子任务
-            List<SubTask> pendingSubTasks = subTaskRepository.findByMasterTaskId(task.getId());
+            List<SubTask> pendingSubTasks = subTaskDao.findByMasterTaskId(task.getId());
 
             for (SubTask subTask : pendingSubTasks) {
                 String status = subTask.getStatus();
                 if ("PENDING".equals(status) || "RUNNING".equals(status) || "RETRYING".equals(status)) {
-                    // RUNNING 状态无法精确恢复，重置为 PENDING
+                    // RUNNING 状态无法精确恢复，重置为 PENDING 后重新提交
                     subTask.setStatus("PENDING");
                     subTask.setRetryCount(0);
                     subTask.setNextExecuteTime(null);
 
-                    // 3. 构造 CommentCollectRequest 提交到异步队列
-                    CommentCollectRequest collectRequest = CommentCollectRequest.builder()
-                            .platformCode(task.getPlatformCode())
-                            .featureCode(task.getFeatureCode())
-                            .targetId(extractTargetId(subTask.getLink()))
-                            .userId(task.getUserId())
-                            .userTierCode(task.getUserTierCode())
-                            .build();
-
-                    collectionFacade.collectAsync(collectRequest);
-                    subTaskRepository.save(subTask);
+                    // 3. 交给任务管理服务重新提交（内部带 taskId/subTaskId/fromUrl，
+                    //    完成后会回写子任务状态并把结果落库到 comment 集合）
+                    taskManagementService.submitSubTask(task, subTask);
                     totalRecovered++;
                 }
             }

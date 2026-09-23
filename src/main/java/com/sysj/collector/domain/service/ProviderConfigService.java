@@ -5,9 +5,9 @@ import com.sysj.collector.domain.document.PlatformFeatureConfig;
 
 import com.sysj.collector.domain.document.UserTierConfig;
 
-import com.sysj.collector.domain.repository.PlatformFeatureConfigRepository;
+import com.sysj.collector.domain.dao.PlatformFeatureConfigDao;
 
-import com.sysj.collector.domain.repository.UserTierConfigRepository;
+import com.sysj.collector.domain.dao.UserTierConfigDao;
 
 import com.sysj.collector.exception.CollectorException;
 
@@ -15,10 +15,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
-import org.springframework.data.mongodb.core.MongoTemplate;
-import org.springframework.data.mongodb.core.query.Criteria;
-import org.springframework.data.mongodb.core.query.Query;
-import org.springframework.data.mongodb.core.query.Update;
 import org.springframework.stereotype.Service;
 
 import java.util.Optional;
@@ -29,15 +25,17 @@ import java.util.Optional;
  * <p>所有查询走 Caffeine 本地缓存（TTL 60s），
  * 运维修改 MongoDB 后可调用 evict 接口立即刷新，
  * 或等待 TTL 自然过期（最长 60s 延迟）。
+ *
+ * <p>数据访问一律委托给 Dao（{@link PlatformFeatureConfigDao} / {@link UserTierConfigDao}），
+ * 本类不直接持有 {@code MongoTemplate}。
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class ProviderConfigService {
 
-    private final PlatformFeatureConfigRepository featureConfigRepo;
-    private final UserTierConfigRepository userTierConfigRepo;
-    private final MongoTemplate mongoTemplate;
+    private final PlatformFeatureConfigDao featureConfigDao;
+    private final UserTierConfigDao userTierConfigDao;
 
     // ── 查询（带缓存） ─────────────────────────────────────────────────────
 
@@ -47,7 +45,7 @@ public class ProviderConfigService {
      */
     @Cacheable(value = "featureConfig", key = "#platformCode + ':' + #featureCode")
     public PlatformFeatureConfig loadFeatureConfig(String platformCode, String featureCode) {
-        return featureConfigRepo
+        return featureConfigDao
                 .findByPlatformCodeAndFeatureCode(platformCode, featureCode)
                 .filter(PlatformFeatureConfig::isStatus)
                 .orElseThrow(() -> new CollectorException(
@@ -60,7 +58,7 @@ public class ProviderConfigService {
      */
     @Cacheable(value = "userTierConfig", key = "#tierCode")
     public Optional<UserTierConfig> loadUserTierConfig(String tierCode) {
-        return userTierConfigRepo.findByTierCode(tierCode);
+        return userTierConfigDao.findByTierCode(tierCode);
     }
 
     // ── 缓存管理 ───────────────────────────────────────────────────────────
@@ -89,40 +87,33 @@ public class ProviderConfigService {
         log.info("全量缓存淘汰完成");
     }
 
-    // ── MongoDB 运维操作（不通过 Repository，直接用 MongoTemplate 精确更新） ─
+    // ── 供应商数组元素的运维更新（委托 Dao） ───────────────────────────────
 
     /**
      * 更新指定功能下某供应商的健康状态。
-     * 使用 MongoDB 数组过滤器做精确字段更新，不影响其他供应商。
-     * 更新后调用方须手动淘汰缓存。
+     *
+     * <p>更新成功后自动淘汰该功能的配置缓存。
+     * <b>注意</b>：缓存淘汰依赖 Spring 代理，因此本方法必须由<b>外部</b>调用（同类内部调用不会触发 {@code @CacheEvict}）。
+     *
+     * @return 命中的文档数；0 表示 platform / feature / providerKey 组合不存在
      */
-    public void updateProviderHealth(String platformCode, String featureCode,
+    @CacheEvict(value = "featureConfig", key = "#platformCode + ':' + #featureCode")
+    public long updateProviderHealth(String platformCode, String featureCode,
                                      String providerKey, boolean isHealthy) {
-        Query query = new Query(
-                Criteria.where("platformCode").is(platformCode)
-                        .and("featureCode").is(featureCode)
-                        .and("providers.providerKey").is(providerKey));
-        Update update = new Update()
-                .set("providers.$.isHealthy", isHealthy);
-        mongoTemplate.updateFirst(query, update, PlatformFeatureConfig.class);
-        log.info("供应商健康状态已更新: platform={} feature={} provider={} isHealthy={}",
-                platformCode, featureCode, providerKey, isHealthy);
+        return featureConfigDao.updateProviderHealth(platformCode, featureCode, providerKey, isHealthy);
     }
 
     /**
      * 更新指定功能下某供应商的限流速率。
-     * 更新后调用方须手动淘汰缓存 + 调用限流管理器热更新速率。
+     *
+     * <p>更新成功后自动淘汰该功能的配置缓存；调用方还需调用
+     * {@code ProviderRateLimitManager#syncRate} 让令牌桶热更新。
+     *
+     * @return 命中的文档数；0 表示 platform / feature / providerKey 组合不存在
      */
-    public void updateProviderRate(String platformCode, String featureCode,
+    @CacheEvict(value = "featureConfig", key = "#platformCode + ':' + #featureCode")
+    public long updateProviderRate(String platformCode, String featureCode,
                                    String providerKey, double ratePerSecond) {
-        Query query = new Query(
-                Criteria.where("platformCode").is(platformCode)
-                        .and("featureCode").is(featureCode)
-                        .and("providers.providerKey").is(providerKey));
-        Update update = new Update()
-                .set("providers.$.ratePerSecond", ratePerSecond);
-        mongoTemplate.updateFirst(query, update, PlatformFeatureConfig.class);
-        log.info("供应商限流速率已更新: platform={} feature={} provider={} rate={}",
-                platformCode, featureCode, providerKey, ratePerSecond);
+        return featureConfigDao.updateProviderRate(platformCode, featureCode, providerKey, ratePerSecond);
     }
 }

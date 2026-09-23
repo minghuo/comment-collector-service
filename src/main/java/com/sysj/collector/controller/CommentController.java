@@ -3,10 +3,12 @@ package com.sysj.collector.controller;
 import com.sysj.collector.facade.CommentCollectionFacade;
 import com.sysj.collector.model.*;
 import com.sysj.collector.domain.service.TaskManagementService;
+import com.sysj.collector.domain.document.CommentDoc;
 import com.sysj.collector.domain.document.MasterTask;
 import com.sysj.collector.domain.document.SubTask;
-import com.sysj.collector.domain.repository.SubTaskRepository;
-import com.sysj.collector.domain.repository.MasterTaskRepository;
+import com.sysj.collector.domain.dao.CommentDao;
+import com.sysj.collector.domain.dao.SubTaskDao;
+import com.sysj.collector.domain.dao.MasterTaskDao;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -15,7 +17,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.time.Instant;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -33,8 +34,9 @@ public class CommentController {
 
     private final CommentCollectionFacade collectionFacade;
     private final TaskManagementService taskManagementService;
-    private final MasterTaskRepository masterTaskRepository;
-    private final SubTaskRepository subTaskRepository;
+    private final MasterTaskDao masterTaskDao;
+    private final SubTaskDao subTaskDao;
+    private final CommentDao commentDao;
 
     // ── 同步采集 ───────────────────────────────────────────────────────────
 
@@ -117,7 +119,7 @@ public class CommentController {
     @GetMapping("/tasks/{taskId}")
     @Operation(summary = "查询任务状态和结果")
     public ResponseEntity<TaskQueryResponse> queryTask(@PathVariable String taskId) {
-        MasterTask masterTask = masterTaskRepository.findById(taskId)
+        MasterTask masterTask = masterTaskDao.findById(taskId)
                 .orElse(null);
 
         if (masterTask == null) {
@@ -125,7 +127,7 @@ public class CommentController {
         }
 
         // 查询子任务状态
-        List<SubTask> subTasks = subTaskRepository.findByMasterTaskId(taskId);
+        List<SubTask> subTasks = subTaskDao.findByMasterTaskId(taskId);
 
         List<TaskQueryResponse.LinkStatus> linkStatuses = subTasks.stream()
                 .map(st -> TaskQueryResponse.LinkStatus.builder()
@@ -149,6 +151,49 @@ public class CommentController {
                 .build();
 
         return ResponseEntity.ok(response);
+    }
+
+    // ── 采集结果分页查询 ───────────────────────────────────────────────────
+
+    /**
+     * 按任务分页读取已落库的采集结果。
+     *
+     * <p>用于"不能即时返回"以及"需要持续翻页"的任务：任务提交后返回 taskId，
+     * 调用方用本接口分页拉取已经采到的数据，无需等待全部完成。
+     *
+     * @param taskId   主任务 ID
+     * @param page     页码，从 1 开始
+     * @param size     每页条数
+     * @param dataType 可选，按数据类型过滤（weibo_comment / weibo_repost / wechat_comment /
+     *                 wechat_video_comment / bilibili_comment / douyin_comment / xhs_comment / toutiao_comment）
+     */
+    @GetMapping("/tasks/{taskId}/comments")
+    @Operation(summary = "分页查询采集结果", description = "按任务读取已落库的评论/转发数据")
+    public ResponseEntity<Map<String, Object>> queryComments(
+            @PathVariable String taskId,
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "100") int size,
+            @RequestParam(required = false) String dataType) {
+
+        int safePage = Math.max(1, page);
+        int safeSize = Math.min(Math.max(1, size), 1000);
+
+        List<CommentDoc> rows = (dataType == null || dataType.isBlank())
+                ? commentDao.findByTaskId(taskId, safePage, safeSize)
+                : commentDao.findByTaskIdAndDataType(taskId, dataType, safePage, safeSize);
+        long total = (dataType == null || dataType.isBlank())
+                ? commentDao.countByTaskId(taskId)
+                : commentDao.countByTaskIdAndDataType(taskId, dataType);
+
+        Map<String, Object> body = new HashMap<>();
+        body.put("success", true);
+        body.put("taskId", taskId);
+        body.put("dataType", dataType);
+        body.put("page", safePage);
+        body.put("size", safeSize);
+        body.put("total", total);
+        body.put("data", rows);
+        return ResponseEntity.ok(body);
     }
 
     // ── 队列状态 ───────────────────────────────────────────────────────────
