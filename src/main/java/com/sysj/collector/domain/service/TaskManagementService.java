@@ -14,6 +14,7 @@ import com.sysj.collector.domain.dao.MasterTaskDao;
 import com.sysj.collector.domain.dao.SubTaskDao;
 
 import com.sysj.collector.facade.CommentCollectionFacade;
+import com.sysj.collector.exception.QueueFullException;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommentCollectResult;
 
@@ -27,6 +28,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * 任务管理服务。
@@ -65,6 +67,41 @@ public class TaskManagementService {
             String supplierConstraint,
             String callbackUrl) {
 
+        // 0. 过载保护 fail-fast：**原子预留**本次请求全部链接的队列名额。
+        //    必须原子：并发突发下"先查容量再入队"会让所有请求都看到余量而全部放行（TOCTOU）。
+        //    必须在落库之前：否则拒绝时会留下"主任务已建、子任务拆了一半"的脏数据。
+        //    必须整批预留：部分受理对调用方毫无意义（既没拿到 503、也无法整批重试）。
+        int slotsNeeded = Math.max(1, links == null ? 1 : links.size());
+        collectionFacade.reserveCapacity(slotsNeeded);
+        int slotsUnused = slotsNeeded;
+        try {
+            MasterTask masterTask = doCreateMasterTask(userId, userTierCode, platformCode, featureCode,
+                    links, mode, requestParams, supplierConstraint, callbackUrl, slotsNeeded);
+            slotsUnused -= masterTask.getTotalLinks();
+            return masterTask;
+        } finally {
+            // 归还没被任何一个子任务消费掉的预留名额（例如 links 为空等边界）
+            collectionFacade.releaseCapacity(slotsUnused);
+        }
+    }
+
+    /**
+     * 真正执行建任务；调用前必须已通过 {@link CommentCollectionFacade#reserveCapacity(int)} 预留名额。
+     *
+     * @param reservedSlots 已预留的名额数，等于 links 数；每个子任务消费一个
+     */
+    private MasterTask doCreateMasterTask(
+            String userId,
+            String userTierCode,
+            String platformCode,
+            String featureCode,
+            List<String> links,
+            String mode,
+            String requestParams,
+            String supplierConstraint,
+            String callbackUrl,
+            int reservedSlots) {
+
         // 1. 创建主任务
         MasterTask masterTask = new MasterTask();
         masterTask.setId(generateTaskId());
@@ -96,9 +133,9 @@ public class TaskManagementService {
         masterTask.setUpdateTime(Instant.now());
         masterTaskDao.save(masterTask);
 
-        // 4. 逐个提交到采集门面（异步队列 + 优先级/防饥饿）
+        // 4. 逐个提交到采集门面（异步队列 + 优先级/防饥饿）。名额已在入口一次性预留，此处不会再因容量失败
         for (SubTask subTask : subTasks) {
-            submitSubTask(masterTask, subTask);
+            submitSubTask(masterTask, subTask, true);
         }
 
         return masterTask;
@@ -135,12 +172,24 @@ public class TaskManagementService {
     }
 
     /**
+     * 提交单个子任务到采集门面（**未预留名额**：内部自行预留 1 个，失败则该子任务判失败）。
+     *
+     * <p>用于恢复扫描等"不属于某个已预留批次"的场景。
+     */
+    public void submitSubTask(MasterTask masterTask, SubTask subTask) {
+        submitSubTask(masterTask, subTask, false);
+    }
+
+    /**
      * 提交单个子任务到采集门面，并在完成时回写子任务/主任务状态。
      *
      * <p>这是"异步任务真正被执行"的入口：此前只落库、没有任何消费者，子任务状态永远停在 PENDING。
      * 采集结果由门面在成功时写入 {@code comment} 集合（见 {@code CommentCollectionFacade#persist}）。
+     *
+     * @param capacityReserved 调用方是否已为本次提交预留队列名额
+     *                         （{@code true} 时使用 {@code collectAsyncReserved}，不会因容量失败）
      */
-    public void submitSubTask(MasterTask masterTask, SubTask subTask) {
+    public void submitSubTask(MasterTask masterTask, SubTask subTask, boolean capacityReserved) {
         CommentCollectRequest collectRequest = CommentCollectRequest.builder()
                 .platformCode(masterTask.getPlatformCode())
                 .featureCode(masterTask.getFeatureCode())
@@ -158,7 +207,28 @@ public class TaskManagementService {
         subTask.setUpdateTime(Instant.now());
         subTaskDao.save(subTask);
 
-        collectionFacade.collectAsync(collectRequest).whenComplete((result, ex) -> {
+        CompletableFuture<CommentCollectResult> future;
+        try {
+            future = capacityReserved
+                    ? collectionFacade.collectAsyncReserved(collectRequest)
+                    : collectionFacade.collectAsync(collectRequest);
+        } catch (QueueFullException qfe) {
+            // 名额未预留时（恢复扫描路径）可能被队列硬上限拒绝：
+            // 必须把该子任务收敛为终态，否则它会永远停在 RUNNING，主任务也永远不完成。
+            log.warn("子任务被队列拒绝: subTaskId={} queueSize={}/{}",
+                    subTask.getId(), qfe.getQueueSize(), qfe.getQueueCapacity());
+            subTask.setStatus(ST_FAILED);
+            subTask.setErrorMessage("服务繁忙：异步队列已满，请稍后重试");
+            subTask.setCompleteTime(Instant.now());
+            subTask.setUpdateTime(Instant.now());
+            subTaskDao.save(subTask);
+            refreshMasterTaskStatus(masterTask.getId());
+            return;
+        }
+
+        // 注意：状态必须在 collectAsync 之前置为 RUNNING。反过来会有竞态 ——
+        // 消费者可能已经跑完并写入 SUCCESS，随后这里再写 RUNNING 把终态覆盖掉。
+        future.whenComplete((result, ex) -> {
             try {
                 applySubTaskResult(masterTask.getId(), subTask.getId(), result, ex);
             } catch (Exception e) {

@@ -112,6 +112,46 @@ public class PlatformFeatureConfig {
          * 修改后缓存 TTL 内（默认 60s）自动刷新，或调用 /api/admin/cache/evict 立即生效。
          */
         private boolean isHealthy = true;
+
+        // ── 自适应限速参数（§8.2）`[借鉴 B-11]` ─────────────────────────────
+        // 全部可选：文档里没有这些字段时用代码默认值，因此老配置无需改动。
+
+        /** 目标并发，用于把响应时间换算成目标延迟；默认 1.0。 */
+        private Double targetConcurrency;
+
+        /** 延迟下限（同时也是初始值），毫秒；默认 500。 */
+        private Long startDelayMs;
+
+        /** 延迟上限，毫秒；默认 60000。 */
+        private Long maxDelayMs;
+
+        /**
+         * 流控效果（§8.3）：`REJECT`（默认）/ `WARM_UP` / `THROTTLE_QUEUE`。
+         * 留空按 `REJECT` 处理。
+         */
+        private String flowEffect;
+
+        /**
+         * `THROTTLE_QUEUE` 下的最长排队等待，毫秒；留空用全局默认
+         * （`collector.ratelimit.max-queue-wait-ms`）。
+         */
+        private Long maxQueueWaitMs;
+
+        /** 取延迟下限与默认值。 */
+        public long startDelayOrDefault() {
+            return startDelayMs == null || startDelayMs <= 0 ? 500L : startDelayMs;
+        }
+
+        /** 取延迟上限，并保证不小于下限。 */
+        public long maxDelayOrDefault() {
+            long start = startDelayOrDefault();
+            return maxDelayMs == null || maxDelayMs < start ? Math.max(start, 60_000L) : maxDelayMs;
+        }
+
+        /** 取目标并发，非法值回退 1.0。 */
+        public double targetConcurrencyOrDefault() {
+            return targetConcurrency == null || targetConcurrency <= 0 ? 1.0 : targetConcurrency;
+        }
     }
 
     /**

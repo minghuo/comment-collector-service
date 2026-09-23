@@ -1,14 +1,17 @@
 package com.sysj.collector.core.router;
 
 
+import com.sysj.collector.core.circuit.ProviderCircuitBreaker;
+import com.sysj.collector.core.ratelimit.AdaptiveDelayPolicy;
+import com.sysj.collector.core.ratelimit.AdaptiveRateLimiter;
+import com.sysj.collector.core.ratelimit.FlowEffect;
 import com.sysj.collector.core.ratelimit.ProviderRateLimitManager;
 
 import com.sysj.collector.domain.document.PlatformFeatureConfig;
 import com.sysj.collector.domain.document.PlatformFeatureConfig.ProviderConfig;
-import com.sysj.collector.domain.document.SupplierState;
-import com.sysj.collector.domain.dao.SupplierStateDao;
 
 import com.sysj.collector.domain.document.UserTierConfig.FeatureProviderConfig;
+import com.sysj.collector.exception.CollectorException;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -21,21 +24,34 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 /**
- * 动态供应商路由器。
+ * 动态供应商路由器 —— <b>唯一路由入口</b>（修正 C-17）。
  *
- * <h3>候选列表构建逻辑</h3>
+ * <p>此前存在两套并行实现：{@code route()}/{@code buildCandidates()}（死代码）与
+ * {@code buildOrderedCandidates()}（门面在用）。两者逐行重复、行为不一致，
+ * 且门面自行过滤健康状态、绕过了 {@code activation_threshold}（C-18）。
+ * 现在统一为 {@link #select(RouteContext)} 一个入口。
+ *
+ * <h3>内部处理顺序</h3>
  * <pre>
- * 1. 取用户等级偏好列表 providerOrder（来自 user_tier_config）
- * 2. 偏好列表中的 key → 按偏好顺序排在候选列表前部
- * 3. 全局供应商列表中未出现在偏好列表的供应商 → 按 priority 追加在后部
+ * 1. 指定供应商分支（requiredProviderKey 非空）→ 直接返回该供应商，跳过后续过滤
+ * 2. 候选构建：用户等级偏好 providerOrder 在前，其余按 priority 升序追加
+ * 3. 健康过滤：运维 kill switch `providers[].is_healthy == false` 剔除
+ * 4. 熔断过滤：`ProviderCircuitBreaker` 判定 OPEN（或半开名额已满）的剔除   ← 修正 C-12
+ * 5. 激活阈值：pending &lt; activation_threshold 时只保留候选首位
  * </pre>
  *
- * <h3>路由检查顺序（对候选列表逐一遍历）</h3>
- * <ol>
- *   <li>isHealthy = true（来自 DB，运维手动维护）</li>
- *   <li>激活阈值：非首位供应商需 pendingCount >= activationThreshold</li>
- *   <li>限流令牌：tryAcquire（等待 ≤ 500ms）</li>
- * </ol>
+ * <h3>健康状态的两层语义（修正 C-12）</h3>
+ * <ul>
+ *   <li>{@code providerCircuitBreaker} 的 {@code supplier_state.circuit_state} = <b>运行时自动健康</b>，
+ *       由真实调用结果驱动，可自动恢复（OPEN → HALF_OPEN → CLOSED）；</li>
+ *   <li>{@code providers[].is_healthy} = <b>运维强制下线开关</b>，只由人改，程序不写；</li>
+ *   <li>两者**取与**：都放行才可用。原先"写 {@code supplier_state}、读 {@code is_healthy}"的分裂已消除。</li>
+ * </ul>
+ *
+ * <h3>为何流控不在这里</h3>
+ * 限流令牌按"真正要执行的那一刻"领取：门面在遍历候选取用某个供应商前调用
+ * {@link #tryAcquireProvider}。若在候选构建阶段就把所有候选的令牌领掉，
+ * 未被使用的候选会白白消耗配额。
  *
  * <p>无熔断器：健康状态由 DB 字段控制，不做程序探测。
  */
@@ -44,63 +60,108 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class DynamicProviderRouter {
 
-    private final ProviderRateLimitManager rateLimitManager;
-    private final SupplierStateDao supplierStateDao;
+    private final AdaptiveRateLimiter adaptiveRateLimiter;
+    private final ProviderCircuitBreaker circuitBreaker;
 
     /** platformCode:featureCode → 待处理任务计数 */
     private final ConcurrentHashMap<String, AtomicInteger> pendingCountMap = new ConcurrentHashMap<>();
 
-    // ── 主路由方法 ─────────────────────────────────────────────────────────
+    // ── 路由上下文 ─────────────────────────────────────────────────────────
 
     /**
-     * 在候选供应商中选出第一个可用的供应商配置。
+     * 一次路由请求的全部输入。
      *
-     * @param platformCode      平台编码
-     * @param featureCode       功能编码
-     * @param allProviders      该功能下所有供应商（DB 返回，按 priority ASC）
-     * @param featureConfig     用户等级在此功能下的偏好配置（可为 null）
-     * @return 可用的 ProviderConfig；全部不可用时返回 empty
+     * @param platformCode       平台编码
+     * @param featureCode        功能编码
+     * @param allProviders       该功能下全部供应商（DB 返回，<b>顺序不作为路由依据</b>）
+     * @param featurePreference  用户等级在此功能下的偏好配置，可为 null
+     * @param requiredProviderKey 强制指定的供应商 key；非空时跳过偏好/健康/阈值
      */
-    public Optional<ProviderConfig> route(
+    public record RouteContext(
             String platformCode,
             String featureCode,
             List<ProviderConfig> allProviders,
-            FeatureProviderConfig featureConfig) {
+            FeatureProviderConfig featurePreference,
+            String requiredProviderKey) {
 
-        List<ProviderConfig> candidates = buildCandidates(allProviders, featureConfig);
-        int pending = getPendingCount(platformCode, featureCode);
-        int threshold = featureConfig != null ? featureConfig.getActivationThreshold() : 0;
-
-        for (int i = 0; i < candidates.size(); i++) {
-            ProviderConfig p = candidates.get(i);
-            String key = p.getProviderKey();
-            String rlKey = ProviderRateLimitManager.buildKey(platformCode, featureCode, key);
-
-            // 1. 健康状态（DB 字段，运维维护）
-            if (!p.isHealthy()) {
-                log.debug("供应商不健康，跳过: key={}", key);
-                continue;
-            }
-
-            // 2. 激活阈值（首位供应商不受限）
-            if (i > 0 && pending < threshold) {
-                log.debug("任务量未达阈值，跳过: key={} pending={} threshold={}", key, pending, threshold);
-                continue;
-            }
-
-            // 3. 限流令牌（速率来自 DB，最长等待 500ms）
-            if (!rateLimitManager.tryAcquire(rlKey, p.getRatePerSecond(), 500)) {
-                log.warn("限流拒绝，跳过: key={} rate={}/s", key, p.getRatePerSecond());
-                continue;
-            }
-
-            log.info("路由成功: platform={} feature={} provider={} priority={} pending={}",
-                    platformCode, featureCode, key, p.getPriority(), pending);
-            return Optional.of(p);
+        /** 常规路由（无强制指定供应商）。 */
+        public static RouteContext of(String platformCode, String featureCode,
+                                      List<ProviderConfig> allProviders,
+                                      FeatureProviderConfig featurePreference) {
+            return new RouteContext(platformCode, featureCode, allProviders, featurePreference, null);
         }
 
-        log.error("所有供应商均不可用: platform={} feature={} pending={}", platformCode, featureCode, pending);
-        return Optional.empty();
+        /** 强制指定供应商。 */
+        public static RouteContext specified(String platformCode, String featureCode,
+                                             List<ProviderConfig> allProviders,
+                                             String requiredProviderKey) {
+            return new RouteContext(platformCode, featureCode, allProviders, null, requiredProviderKey);
+        }
+    }
+
+    // ── 唯一路由入口 ───────────────────────────────────────────────────────
+
+    /**
+     * 选出本次请求可依次尝试的候选供应商（有序）。
+     *
+     * <p>返回空列表表示"当前无可用供应商"；调用方据此直接失败，无需再自行过滤。
+     * 候选列表已按 §7.1 的顺序完成：候选构建 → 健康过滤 → 阈值判断，
+     * 调用方只需按顺序执行 + 逐候选领取限流令牌。
+     */
+    public List<ProviderConfig> select(RouteContext ctx) {
+        List<ProviderConfig> all = ctx.allProviders();
+        if (all == null || all.isEmpty()) {
+            log.warn("功能未配置供应商: platform={} feature={}", ctx.platformCode(), ctx.featureCode());
+            return List.of();
+        }
+
+        // 1. 强制指定供应商：特殊需求，跳过偏好 / 健康 / 阈值
+        if (ctx.requiredProviderKey() != null && !ctx.requiredProviderKey().isBlank()) {
+            String required = ctx.requiredProviderKey();
+            return all.stream()
+                    .filter(p -> required.equals(p.getProviderKey()))
+                    .findFirst()
+                    .map(List::of)
+                    .orElseThrow(() -> new CollectorException("指定供应商不在配置列表中: " + required));
+        }
+
+        // 2. 候选构建：偏好优先 + 全局按 priority 显式升序
+        List<ProviderConfig> candidates = buildCandidates(all, ctx.featurePreference());
+
+        // 3. 健康过滤：两层语义取与
+        //    ① providers[].is_healthy —— 运维强制下线开关（只由人改）
+        //    ② circuit_state        —— 运行时自动健康（由真实调用结果驱动，可自动恢复）
+        List<ProviderConfig> healthy = new ArrayList<>(candidates.size());
+        for (ProviderConfig p : candidates) {
+            if (!p.isHealthy()) {
+                log.debug("供应商被运维强制下线，跳过: key={}", p.getProviderKey());
+                continue;
+            }
+            if (!circuitBreaker.allowRequest(ctx.platformCode(), ctx.featureCode(), p.getProviderKey())) {
+                log.debug("供应商熔断中，跳过: key={} state={}", p.getProviderKey(),
+                        circuitBreaker.stateOf(ctx.platformCode(), ctx.featureCode(), p.getProviderKey()));
+                continue;
+            }
+            healthy.add(p);
+        }
+
+        // 4. 激活阈值：待处理任务量不足时只允许候选首位（修正 C-18）
+        FeatureProviderConfig pref = ctx.featurePreference();
+        int threshold = pref != null ? pref.getActivationThreshold() : 0;
+        if (threshold > 0 && healthy.size() > 1) {
+            int pending = getPendingCount(ctx.platformCode(), ctx.featureCode());
+            if (pending < threshold) {
+                ProviderConfig first = healthy.get(0);
+                log.debug("未达激活阈值，仅启用首位供应商: platform={} feature={} pending={} threshold={} key={}",
+                        ctx.platformCode(), ctx.featureCode(), pending, threshold, first.getProviderKey());
+                healthy = List.of(first);
+            }
+        }
+
+        if (healthy.isEmpty()) {
+            log.error("所有供应商均不可用: platform={} feature={}", ctx.platformCode(), ctx.featureCode());
+        }
+        return healthy;
     }
 
     // ── 候选列表构建 ───────────────────────────────────────────────────────
@@ -109,41 +170,41 @@ public class DynamicProviderRouter {
      * 合并用户偏好与全局列表，构建有序候选列表。
      *
      * <ul>
-     *   <li>偏好列表中存在且 DB 中有效的供应商，按偏好顺序排前面</li>
-     *   <li>偏好列表未覆盖的供应商，按全局 priority 追加在后面</li>
-     *   <li>featureConfig 为 null 时，直接返回全局列表</li>
+     *   <li>偏好列表中存在且 DB 中有效的供应商，按 {@code providerOrder} 给出的顺序排前面</li>
+     *   <li>偏好未覆盖的供应商，<b>按 priority 显式升序</b>追加（不再依赖 DB 数组物理顺序，修正 C-17）</li>
+     *   <li>同 priority 时保持 DB 返回顺序（稳定排序）</li>
      * </ul>
      */
     private List<ProviderConfig> buildCandidates(
             List<ProviderConfig> allProviders,
             FeatureProviderConfig featureConfig) {
 
-        if (featureConfig == null || featureConfig.getProviderOrder() == null
-                || featureConfig.getProviderOrder().isEmpty()) {
-            return allProviders;
-        }
-
-        // key → ProviderConfig，用于快速查找
-        Map<String, ProviderConfig> providerMap = allProviders.stream()
-                .collect(Collectors.toMap(ProviderConfig::getProviderKey, p -> p, (a, b) -> a));
-
-        List<ProviderConfig> result = new ArrayList<>();
+        List<ProviderConfig> result = new ArrayList<>(allProviders.size());
         Set<String> added = new LinkedHashSet<>();
 
-        // 按偏好顺序插入
-        for (String prefKey : featureConfig.getProviderOrder()) {
-            ProviderConfig p = providerMap.get(prefKey);
-            if (p != null && added.add(prefKey)) {
-                result.add(p);
+        // 偏好内的相对顺序 = providerOrder 顺序
+        if (featureConfig != null && featureConfig.getProviderOrder() != null
+                && !featureConfig.getProviderOrder().isEmpty()) {
+            Map<String, ProviderConfig> providerMap = new HashMap<>();
+            for (ProviderConfig p : allProviders) {
+                providerMap.putIfAbsent(p.getProviderKey(), p);
+            }
+            for (String prefKey : featureConfig.getProviderOrder()) {
+                ProviderConfig p = providerMap.get(prefKey);
+                if (p != null && added.add(prefKey)) {
+                    result.add(p);
+                }
             }
         }
 
-        // 补充全局列表中未包含的供应商（按原始 priority 顺序）
-        for (ProviderConfig p : allProviders) {
-            if (added.add(p.getProviderKey())) {
-                result.add(p);
-            }
-        }
+        // 全局兜底：显式按 priority 升序
+        allProviders.stream()
+                .sorted(Comparator.comparingInt(ProviderConfig::getPriority))
+                .forEach(p -> {
+                    if (added.add(p.getProviderKey())) {
+                        result.add(p);
+                    }
+                });
 
         return result;
     }
@@ -169,75 +230,71 @@ public class DynamicProviderRouter {
         return platformCode + ":" + featureCode;
     }
 
-    // ── 新增：供 Facade 调用的公共方法 ────────────────────────────────────
+    // ── 限流（自适应速率 + 流控效果） ──────────────────────────────────────
 
     /**
-     * 构建有序候选供应商列表（合并用户偏好 + 全局优先级）。
-     * 公开方法，供 Facade 直接获取完整列表进行遍历切换。
+     * 尝试获取一次调用许可。
+     *
+     * <p>有效速率 = {@code min(rate_per_second, 1000 / adaptive_delay_ms)}，
+     * 再按 {@code flowEffect} 决定取不到令牌时的行为（§8.3）。
+     * 由调用方在**真正执行某个候选之前**调用。
      */
-    public List<ProviderConfig> buildOrderedCandidates(
-            List<ProviderConfig> allProviders,
-            FeatureProviderConfig featureConfig) {
-
-        if (featureConfig == null || featureConfig.getProviderOrder() == null
-                || featureConfig.getProviderOrder().isEmpty()) {
-            return allProviders;
-        }
-
-        Map<String, ProviderConfig> providerMap = allProviders.stream()
-                .collect(Collectors.toMap(ProviderConfig::getProviderKey, p -> p, (a, b) -> a));
-
-        List<ProviderConfig> result = new ArrayList<>();
-        Set<String> added = new LinkedHashSet<>();
-
-        for (String prefKey : featureConfig.getProviderOrder()) {
-            ProviderConfig p = providerMap.get(prefKey);
-            if (p != null && added.add(prefKey)) {
-                result.add(p);
-            }
-        }
-
-        for (ProviderConfig p : allProviders) {
-            if (added.add(p.getProviderKey())) {
-                result.add(p);
-            }
-        }
-
-        return result;
+    public boolean tryAcquireProvider(String platformCode, String featureCode, ProviderConfig provider) {
+        String key = ProviderRateLimitManager.buildKey(platformCode, featureCode, provider.getProviderKey());
+        return adaptiveRateLimiter.acquire(key, flowSpecOf(provider));
     }
 
-    /**
-     * 尝试获取供应商限流令牌。
-     */
-    public boolean tryAcquireProvider(String platformCode, String featureCode,
-                                       String providerKey, double ratePerSecond) {
-        String rlKey = ProviderRateLimitManager.buildKey(platformCode, featureCode, providerKey);
-        return rateLimitManager.tryAcquire(rlKey, ratePerSecond, 500);
+    /** 当前有效速率（供监控/状态接口）。 */
+    public double effectiveRateOf(String platformCode, String featureCode, ProviderConfig provider) {
+        String key = ProviderRateLimitManager.buildKey(platformCode, featureCode, provider.getProviderKey());
+        return adaptiveRateLimiter.effectiveRate(key, flowSpecOf(provider));
     }
 
+    /** 由供应商配置构造流控规格（缺省字段由 ProviderConfig 的 *OrDefault 兜底）。 */
+    private AdaptiveRateLimiter.FlowSpec flowSpecOf(ProviderConfig provider) {
+        AdaptiveDelayPolicy.Params params = new AdaptiveDelayPolicy.Params(
+                provider.targetConcurrencyOrDefault(),
+                provider.startDelayOrDefault(),
+                provider.maxDelayOrDefault());
+        return new AdaptiveRateLimiter.FlowSpec(
+                provider.getRatePerSecond(),
+                params,
+                FlowEffect.of(provider.getFlowEffect()),
+                provider.getMaxQueueWaitMs() == null ? 0L : provider.getMaxQueueWaitMs());
+    }
+
+    // ── 供应商运行时状态（熔断 + 自适应限速，统一上报入口） ────────────────
+
     /**
-     * 标记供应商连续失败（更新数据库状态）。
+     * 上报一次调用结果 —— **熔断器与自适应限速的唯一上报入口**。
+     *
+     * <p>刻意做成一个方法而不是两个：{@code C-12} 的教训就是"同一份事实被两条路径分别写入"，
+     * 一旦某个调用点漏报其中一个，两者的视图就会永久分裂。
      */
-    public void markProviderFailure(String platformCode, String featureCode,
-                                     String providerKey) {
-        try {
-            String key = PlatformFeatureConfig.buildStateKey(platformCode, featureCode, providerKey);
-            SupplierState state = supplierStateDao.findBySupplierKey(key)
-                    .orElseGet(() -> {
-                        SupplierState s = new SupplierState();
-                        s.setSupplierKey(key);
-                        s.setPlatformCode(platformCode);
-                        s.setFeatureCode(featureCode);
-                        s.setConsecutiveFailures(0);
-                        return s;
-                    });
-            state.setConsecutiveFailures(
-                    (state.getConsecutiveFailures() == null ? 0 : state.getConsecutiveFailures()) + 1);
-            state.setLastFailureTime(java.time.Instant.now());
-            state.setHealthStatus("DOWN");
-            supplierStateDao.save(state);
-        } catch (Exception e) {
-            log.warn("更新供应商失败状态异常(非关键): provider={}", providerKey, e);
+    public void markProviderOutcome(String platformCode, String featureCode,
+                                    ProviderConfig provider, long latencyMs, boolean success) {
+        String providerKey = provider.getProviderKey();
+        AdaptiveDelayPolicy.Params params = new AdaptiveDelayPolicy.Params(
+                provider.targetConcurrencyOrDefault(),
+                provider.startDelayOrDefault(),
+                provider.maxDelayOrDefault());
+        if (success) {
+            circuitBreaker.recordSuccess(platformCode, featureCode, providerKey, latencyMs);
+        } else {
+            circuitBreaker.recordFailure(platformCode, featureCode, providerKey, latencyMs);
         }
+        adaptiveRateLimiter.recordOutcome(
+                ProviderRateLimitManager.buildKey(platformCode, featureCode, providerKey), latencyMs, success, params);
+    }
+
+    /** 查询供应商当前熔断状态（供运维接口）。 */
+    public com.sysj.collector.core.circuit.CircuitState circuitStateOf(
+            String platformCode, String featureCode, String providerKey) {
+        return circuitBreaker.stateOf(platformCode, featureCode, providerKey);
+    }
+
+    /** 自适应延迟快照（供运维接口）。 */
+    public java.util.Map<String, Long> adaptiveDelaySnapshot() {
+        return adaptiveRateLimiter.delaySnapshot();
     }
 }

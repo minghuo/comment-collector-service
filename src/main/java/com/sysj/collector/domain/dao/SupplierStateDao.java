@@ -7,8 +7,10 @@ import org.springframework.data.domain.Sort;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.data.mongodb.core.query.Update;
 import org.springframework.stereotype.Component;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -55,5 +57,26 @@ public class SupplierStateDao {
                 .and("featureCode").is(featureCode));
         query.with(Sort.by(Sort.Direction.ASC, "supplierKey"));
         return mongoTemplate.find(query, SupplierState.class);
+    }
+
+    /**
+     * 只更新自适应限速的两个派生字段。
+     *
+     * <p><b>必须用 `$set` 定点更新，不能 `save()` 整档</b>：{@code supplier_state} 同时被熔断器
+     * （`circuit_state` / 计数）和自适应限速（`effective_qps` / `adaptive_delay_ms`）写入，
+     * 整档替换会让两个写者互相覆盖 —— 正是 C-12 那类"两个写者一个真相"问题的翻版。
+     *
+     * @return 是否命中文档（文档不存在时为 false，不做 upsert）
+     */
+    public boolean updateAdaptiveMetrics(String supplierKey, double effectiveQps, long adaptiveDelayMs) {
+        if (supplierKey == null || supplierKey.isBlank()) {
+            return false;
+        }
+        Query query = new Query(Criteria.where("supplierKey").is(supplierKey));
+        Update update = new Update()
+                .set("effectiveQps", effectiveQps)
+                .set("adaptiveDelayMs", adaptiveDelayMs)
+                .set("updateTime", Instant.now());
+        return mongoTemplate.updateFirst(query, update, SupplierState.class).getMatchedCount() > 0;
     }
 }

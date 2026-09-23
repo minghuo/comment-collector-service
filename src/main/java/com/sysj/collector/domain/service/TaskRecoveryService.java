@@ -8,6 +8,7 @@ import com.sysj.collector.facade.CommentCollectionFacade;
 import com.sysj.collector.model.CommentCollectRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
@@ -19,6 +20,10 @@ import java.util.List;
  *
  * <p>应用启动时扫描数据库中尚未完成的任务，重置子任务状态并重新提交到异步队列。
  * 保证项目重新发布后正在采集的任务能够续上。
+ *
+ * <p>开关由 {@code collector.recovery.*} 控制 —— 此前这两个配置**无任何读取方**（C-19 死配置）。
+ * 提供开关是有实际意义的：遇到问题版本时运营需要能**先关掉恢复扫描**再排查，
+ * 否则每次重启都会把一批任务重新灌进队列、放大故障。
  */
 @Slf4j
 @Service
@@ -30,11 +35,28 @@ public class TaskRecoveryService {
     private final TaskManagementService taskManagementService;
     private final CommentCollectionFacade collectionFacade;
 
+    /** 总开关：false 时完全不执行断点续采。 */
+    @Value("${collector.recovery.enabled:true}")
+    private boolean recoveryEnabled;
+
+    /** 是否在应用启动时扫描；false 时启动不扫（保留给将来的定时/手动触发）。 */
+    @Value("${collector.recovery.scan-on-startup:true}")
+    private boolean scanOnStartup;
+
     /**
      * 应用完全启动后执行断点恢复扫描。
      */
     @EventListener(ApplicationReadyEvent.class)
     public void scanAndRecover() {
+        if (!recoveryEnabled) {
+            log.info("断点续采已关闭（collector.recovery.enabled=false），跳过扫描");
+            return;
+        }
+        if (!scanOnStartup) {
+            log.info("启动扫描已关闭（collector.recovery.scan-on-startup=false），跳过扫描");
+            return;
+        }
+
         log.info("=== 断点续采扫描开始 ===");
 
         // 1. 扫描未完成的主任务

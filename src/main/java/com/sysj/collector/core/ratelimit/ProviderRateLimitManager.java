@@ -62,6 +62,28 @@ public class ProviderRateLimitManager {
     }
 
     /**
+     * 热更新速率，**静默版本**（供自适应限速按次调用）。
+     *
+     * <p>自适应会随每次调用的耗时微调速率，若沿用 {@link #syncRate} 会刷满日志。
+     * 这里只在变化超过 {@code 1%} 时才真正写入，避免无意义的 {@code setRate} 抖动。
+     *
+     * @return 是否实际发生了变更
+     */
+    public boolean syncRateQuietly(String rateLimiterKey, double newRate) {
+        RateLimiter limiter = limiters.get(rateLimiterKey);
+        if (limiter == null || newRate <= 0) {
+            return false;
+        }
+        double oldRate = limiter.getRate();
+        if (oldRate > 0 && Math.abs(newRate - oldRate) / oldRate < 0.01) {
+            return false;
+        }
+        limiter.setRate(newRate);
+        log.debug("自适应限流速率更新: key={} {} -> {}/s", rateLimiterKey, oldRate, newRate);
+        return true;
+    }
+
+    /**
      * 删除指定 key 的令牌桶（下次访问时重新懒创建）。
      * 用于彻底重置某供应商的限流状态。
      */

@@ -1,11 +1,6 @@
 package com.sysj.collector.constants;
 
 
-/**
- * @author bewilder
- * @date 2025/4/14
- * @description 梁博接口常量
- */
 public class QbConstants {
 
     public static final String BASE_URL = "http://projects-databus.gsdata.cn:7777/api-project/service";

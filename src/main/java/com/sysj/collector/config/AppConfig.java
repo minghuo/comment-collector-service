@@ -1,20 +1,14 @@
 package com.sysj.collector.config;
 
 
-import com.sysj.collector.exception.CollectorException;
-
 import com.github.benmanes.caffeine.cache.Caffeine;
 import org.springframework.cache.CacheManager;
 import org.springframework.cache.annotation.EnableCaching;
 import org.springframework.cache.caffeine.CaffeineCacheManager;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.http.ResponseEntity;
 import org.springframework.scheduling.annotation.EnableAsync;
-import org.springframework.web.bind.annotation.ExceptionHandler;
-import org.springframework.web.bind.annotation.RestControllerAdvice;
 
-import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 @Configuration
@@ -41,21 +35,8 @@ public class AppConfig {
         return manager;
     }
 
-    // ── 全局异常处理 ──────────────────────────────────────────────────────
-
-    @RestControllerAdvice
-    static class GlobalExceptionHandler {
-
-        @ExceptionHandler(CollectorException.class)
-        public ResponseEntity<Map<String, String>> handleCollector(CollectorException e) {
-            return ResponseEntity.badRequest()
-                    .body(Map.of("error", e.getMessage()));
-        }
-
-        @ExceptionHandler(Exception.class)
-        public ResponseEntity<Map<String, String>> handleGeneral(Exception e) {
-            return ResponseEntity.internalServerError()
-                    .body(Map.of("error", "内部错误: " + e.getMessage()));
-        }
-    }
+    // 注意：本类原先还有一个内部 @RestControllerAdvice（含 @ExceptionHandler(Exception.class)）。
+    // 它与 controller 包的 GlobalExceptionHandler 同时存在，且因 advice 顺序靠前而"先命中即赢"，
+    // 把所有更具体的处理器（QueueFullException→503 等）全部盖成 500。
+    // 现已合并到 com.sysj.collector.controller.GlobalExceptionHandler，此处删除以免复发。
 }

@@ -199,10 +199,15 @@ public class CommentController {
     // ── 队列状态 ───────────────────────────────────────────────────────────
 
     @GetMapping("/queue/status")
-    @Operation(summary = "查询任务队列状态")
+    @Operation(summary = "查询任务队列状态",
+            description = "包含队列长度、容量上限与剩余名额；剩余为 0 时新的异步提交会被拒绝（HTTP 503）")
     public ResponseEntity<Map<String, Object>> queueStatus() {
         Map<String, Object> status = new HashMap<>();
         status.put("queueSize", collectionFacade.getQueueSize());
+        status.put("queueCapacity", collectionFacade.getQueueCapacity());
+        status.put("queueRemaining", collectionFacade.getRemainingCapacity());
+        // 队列长度可能是 0 而名额已满：消费者取走任务后才开始执行，在途任务同样占用名额
+        status.put("overloaded", collectionFacade.getRemainingCapacity() <= 0);
         return ResponseEntity.ok(status);
     }
 
