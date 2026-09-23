@@ -1,8 +1,5 @@
 package com.sysj.collector.model;
 
-
-import cn.idev.excel.annotation.ExcelIgnore;
-import cn.idev.excel.annotation.ExcelProperty;
 import com.bewilder.parser.CommonParser;
 import com.bewilder.parser.TimeParser;
 import com.bewilder.tools.CommonTools;
@@ -24,52 +21,30 @@ import java.util.Date;
 @Document(collection = "weibo_comment")
 public class WeiboComment {
 
-    @ExcelIgnore
     private String id;
 
-    @ExcelIgnore
     @Indexed
     private String taskId; //主任务id
-    @ExcelIgnore
     @Indexed
     private long insertTime; //插入时间
-    @ExcelIgnore
     private String commentId; //评论id
-    @ExcelProperty(value = "原微博地址")
     private String fromUrl;//原微博地址
-    @ExcelProperty(value = "评论时间")
     private String time;//评论时间
-    @ExcelProperty(value = "评论内容")
     private String text;//评论内容
-    @ExcelProperty(value = "评论来源")
     private String source; //评论来源
-    @ExcelProperty(value = "点赞数")
     private Integer likeCount;//点赞数
-    @ExcelProperty(value = "回复数")
     private Integer replyCount;//回复数
-    @ExcelProperty(value = "评论用户的id")
     private String uid; //评论用户的id
-    @ExcelProperty(value = "评论用户的昵称")
     private String userName;//评论用户的昵称
-    @ExcelProperty(value = "关注数")
     private long followCount;//关注数
-    @ExcelProperty(value = "粉丝数")
     private long fansCount;//粉丝数
-    @ExcelProperty(value = "发文数")
     private int statusCount; //微博发文数
-    @ExcelProperty(value = "性别")
     private String gender;//性别
-    @ExcelProperty(value = "用户位置")
     private String location;//用户位置
-    @ExcelProperty(value = "用户描述")
     private String description;//用户描述
-    @ExcelProperty(value = "用户认证类型")
     private String verifyType;//用户认证类型
-    @ExcelProperty(value = "用户认证信息")
     private String verifyInfo;//用户认证信息
-    @ExcelProperty(value = "是否铁粉")
     private String bigfans; //是否铁粉
-    @ExcelProperty(value = "父评论id")
     private String parentCommentId;//父评论id
 
 
