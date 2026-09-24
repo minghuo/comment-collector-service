@@ -152,6 +152,45 @@ public class PlatformFeatureConfig {
         public double targetConcurrencyOrDefault() {
             return targetConcurrency == null || targetConcurrency <= 0 ? 1.0 : targetConcurrency;
         }
+
+        // ── 调用管线参数（§8.1 / §9.5）`[借鉴 B-20 / B-03]` ────────────────────
+        // 修正 C-43：这两个字段此前**只存在于设计文档**（§5.1 样例、§6 字段表、§9.5 超时表），
+        // 实体上没有属性、代码里也没有读取方 —— 属于"文档承诺了但运行时完全不存在"的死配置。
+
+        /**
+         * Bulkhead 并发上限：该供应商同时最多几个在途调用；{@code 0} = 不限。
+         * 留空时取全局 {@code collector.pipeline.default-max-concurrency}。
+         */
+        private Integer maxConcurrency;
+
+        /**
+         * 单次调用超时（毫秒）；{@code <=0} = 不限时。留空时取全局
+         * {@code collector.pipeline.timeout-ms}。
+         *
+         * <p>注意它限的是**单次尝试**（一次 {@code fetchComments}），不是整条重试链 ——
+         * 整链预算是 {@code timeout_ms × (max_retry + 1) + 退避总和}（§9.5）。
+         */
+        private Long timeoutMs;
+
+        // ── 能力矩阵（§7.2）`[借鉴 B-26]` ────────────────────────────────────
+
+        /**
+         * 该供应商的能力清单，取值见 {@link com.sysj.collector.core.provider.Capability}：
+         * {@code COMMENT} / {@code SUB_COMMENT} / {@code CURSOR_PAGING} / {@code PAGE_PAGING} /
+         * {@code SYNC_SUPPORTED} / {@code PROXY} / {@code LOGIN_STATE}。
+         *
+         * <p>请求可用 {@code requiredCapabilities} 要求"必须全部满足"；
+         * 启动期由 {@link com.sysj.collector.core.provider.ProviderCapabilityValidator}
+         * 与实现类上的 {@code @ProviderCapability} 注解比对，不一致会告警（C-24）。
+         *
+         * <p>留空表示"未声明" —— 此时**不会**因为能力而被过滤掉（向后兼容）。
+         */
+        private List<String> capabilities;
+
+        /** 解析为能力集合；未声明返回空集。 */
+        public java.util.Set<com.sysj.collector.core.provider.Capability> capabilitySet() {
+            return com.sysj.collector.core.provider.Capability.parse(capabilities);
+        }
     }
 
     /**

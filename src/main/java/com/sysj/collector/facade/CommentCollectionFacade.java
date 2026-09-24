@@ -1,8 +1,9 @@
 package com.sysj.collector.facade;
 
+import com.sysj.collector.core.pipeline.ProviderInvocationPipeline;
+import com.sysj.collector.core.provider.Capability;
 import com.sysj.collector.core.provider.CommentProvider;
 import com.sysj.collector.core.router.DynamicProviderRouter;
-import com.sysj.collector.core.router.RetryableProviderExecutor;
 import com.sysj.collector.core.scheduler.FairQuotaPolicy;
 import com.sysj.collector.core.scheduler.Prioritized;
 import com.sysj.collector.core.scheduler.PriorityTaskQueue;
@@ -15,6 +16,7 @@ import com.sysj.collector.domain.document.UserTierConfig;
 import com.sysj.collector.domain.document.UserTierConfig.FeatureProviderConfig;
 import com.sysj.collector.domain.service.ProviderConfigService;
 import com.sysj.collector.exception.CollectorException;
+import com.sysj.collector.exception.ProviderInvocationException;
 import com.sysj.collector.exception.QueueFullException;
 import com.sysj.collector.metrics.TaskMetrics;
 import com.sysj.collector.model.Comment;
@@ -92,6 +94,7 @@ public class CommentCollectionFacade {
 
     private final ProviderConfigService configService;
     private final DynamicProviderRouter router;
+    private final ProviderInvocationPipeline pipeline;
     private final ApplicationContext applicationContext;
     private final TaskMetrics taskMetrics;
     private final CommentDao commentDao;
@@ -118,11 +121,13 @@ public class CommentCollectionFacade {
 
     public CommentCollectionFacade(ProviderConfigService configService,
                                    DynamicProviderRouter router,
+                                   ProviderInvocationPipeline pipeline,
                                    ApplicationContext applicationContext,
                                    TaskMetrics taskMetrics,
                                    CommentDao commentDao) {
         this.configService = configService;
         this.router = router;
+        this.pipeline = pipeline;
         this.applicationContext = applicationContext;
         this.taskMetrics = taskMetrics;
         this.commentDao = commentDao;
@@ -416,33 +421,26 @@ public class CommentCollectionFacade {
 
         router.incrementPending(platform, feature);
         try {
-            // 4. 统一路由入口：候选构建（按 priority 升序）→ 健康过滤 → 激活阈值
-            List<ProviderConfig> candidates = router.select(DynamicProviderRouter.RouteContext.of(
-                    platform, feature, allProviders, featurePreference));
+            // 4. 统一路由入口：候选构建 → 健康/熔断过滤 → 能力过滤 → 激活阈值
+            DynamicProviderRouter.RouteResult routeResult = router.selectDetailed(
+                    DynamicProviderRouter.RouteContext.of(platform, feature, allProviders,
+                            featurePreference, Capability.parse(request.getRequiredCapabilities())));
 
+            List<ProviderConfig> candidates = routeResult.candidates();
             if (candidates.isEmpty()) {
-                return CommentCollectResult.failed("当前无可用供应商，请稍后重试");
+                // 用路由给出的可诊断原因：区分"能力不满足"与"全部不可用"
+                return CommentCollectResult.failed(routeResult.reason());
             }
 
             // 5. 遍历候选供应商并执行，失败时自动切换
+            //    限流、熔断闸门、Bulkhead、重试、单次调用限时、结果上报全部在调用管线内完成（§9.2），
+            //    门面只负责"选谁 + 失败后换谁 + 落库"。
             Set<String> excludedKeys = new HashSet<>();
             Map<String, String> providerErrors = new LinkedHashMap<>();
             for (ProviderConfig providerConfig : candidates) {
                 String key = providerConfig.getProviderKey();
                 if (excludedKeys.contains(key)) continue;
 
-                // 限流检查（自适应速率 + 流控效果）
-                boolean acquired = router.tryAcquireProvider(platform, feature, providerConfig);
-                if (!acquired) {
-                    String effect = providerConfig.getFlowEffect();
-                    log.warn("供应商限流跳过: key={} effect={} 有效速率={}/s",
-                            key, effect == null ? "REJECT" : effect,
-                            String.format("%.3f", router.effectiveRateOf(platform, feature, providerConfig)));
-                    providerErrors.put(key, "限流未获取到令牌");
-                    continue;
-                }
-
-                // 执行（含重试）
                 CommentCollectResult result = executeProviderWithSwitch(
                         request, providerConfig, excludedKeys, providerErrors);
 
@@ -464,6 +462,9 @@ public class CommentCollectionFacade {
      * 执行单个供应商，失败时记录排除。
      * 返回 null 表示需要切换供应商，返回非 null 为最终结果。
      *
+     * <p>调用本身交给 {@link ProviderInvocationPipeline}：Bulkhead → 熔断闸门 → 限流 →
+     * 重试 → 单次限时，并在管线内统一上报结果。本方法只做"取 Bean / 组装结果 / 记录失败原因"。
+     *
      * @param providerErrors 失败原因收集器（key → 原因），用于最终失败信息里带出真实原因
      */
     private CommentCollectResult executeProviderWithSwitch(
@@ -483,44 +484,34 @@ public class CommentCollectionFacade {
             return null; // 切换供应商
         }
 
-        // started 必须在 try 之外：**失败也要上报真实耗时**。
-        // 否则失败路径报 -1（耗时未知），自适应限速的"失败只增不减"就永远不会触发 ——
-        // 而这恰恰是"失败越猛打越猛"要修的那一半。
-        long started = System.currentTimeMillis();
         try {
-            CommonEntity<Comment> result =
-                    RetryableProviderExecutor.execute(provider, request, providerConfig.getMaxRetry());
-            long latency = System.currentTimeMillis() - started;
-
-            CommentCollectResult collected = toResult(request, key, result);
-
-            // 成功必须上报（熔断器没有恢复路径 + 自适应限速需要真实耗时）
-            router.markProviderOutcome(request.getPlatformCode(), request.getFeatureCode(),
-                    providerConfig, latency, true);
-            return collected;
+            CommonEntity<Comment> result = pipeline.invoke(request, providerConfig, provider);
+            return toResult(request, key, result);
 
         } catch (Exception e) {
-            long latency = System.currentTimeMillis() - started;
-            log.error("供应商执行失败，切换: provider={} 耗时={}ms error={}", key, latency, e.getMessage());
+            log.error("供应商执行失败，切换: provider={} error={}", key, e.getMessage());
 
             providerErrors.put(key, e.getMessage());
 
-            // 标记该供应商失败，路由器后续将跳过
+            // 排除该供应商，由外层循环切换到下一个候选
             excludedKeys.add(key);
-
-            // 统一上报（熔断器 + 自适应限速，见 markProviderOutcome 注释）
-            router.markProviderOutcome(platform(request), feature(request), providerConfig, latency, false);
 
             // 返回 null 触发外层循环切换到下一个供应商
             return null;
         }
     }
 
-    private String platform(CommentCollectRequest r) { return r.getPlatformCode(); }
-    private String feature(CommentCollectRequest r) { return r.getFeatureCode(); }
-
     /**
-     * 对单个供应商执行重试逻辑（不切换）。
+     * 对单个供应商执行（不切换）—— 指定供应商路径。
+     *
+     * <p>与切换路径共用同一条调用管线，区别是失败后**不再换人**。
+     *
+     * <p><b>失败语义（P2-8 的有意变更）</b>：调用方点名要某个供应商时，该供应商不可用属于
+     * **服务端依赖问题**，因此 {@link ProviderInvocationException}（熔断/限流/Bulkhead/超时/上游失败）
+     * 直接向上抛，由 {@code GlobalExceptionHandler} 映射成 **503 + code=PROVIDER_UNAVAILABLE**，
+     * 而不是像"候选全灭"那样回 200 + {@code success=false}。
+     * 理由：调用方既然点名了供应商，就该知道"是它不行、可以稍后重试"，
+     * 而不是拿到一个无法区分的失败体去猜是参数错了还是下游挂了。
      */
     private CommentCollectResult executeProviderRetry(
             CommentCollectRequest request, ProviderConfig providerConfig) {
@@ -533,42 +524,26 @@ public class CommentCollectionFacade {
             return CommentCollectResult.failed("供应商 Bean 未注册: " + key);
         }
 
-        long started = System.currentTimeMillis();
         try {
-            CommonEntity<Comment> result =
-                    RetryableProviderExecutor.execute(provider, request, providerConfig.getMaxRetry());
-            long latency = System.currentTimeMillis() - started;
-
-            CommentCollectResult collected = toResult(request, key, result);
-            // 指定供应商路径同样要上报结果，否则它的熔断与自适应统计永远是空的
-            router.markProviderOutcome(request.getPlatformCode(), request.getFeatureCode(),
-                    providerConfig, latency, true);
-            return collected;
-
+            CommonEntity<Comment> result = pipeline.invoke(request, providerConfig, provider);
+            return toResult(request, key, result);
+        } catch (ProviderInvocationException e) {
+            throw e;   // → 503 PROVIDER_UNAVAILABLE
         } catch (Exception e) {
-            router.markProviderOutcome(request.getPlatformCode(), request.getFeatureCode(),
-                    providerConfig, System.currentTimeMillis() - started, false);
-            return CommentCollectResult.failed("供应商 [" + key + "] 执行失败: " + e.getMessage());
+            throw new ProviderInvocationException(key, "供应商 [" + key + "] 执行失败: " + e.getMessage(), e);
         }
     }
 
     /**
-     * 统一的结果处理：判定成败 → 落库 → 组装返回。
+     * 结果后处理：落库 → 组装返回。
      *
      * <p><b>失败判定口径（重要）</b>：供应商实现按约定有两种失败表达方式 ——
-     * ① 抛异常；② 返回 {@code status != STATUS_SUCCESS}。二者都必须被识别为失败，
-     * 否则会出现"不重试、不切换、还返回 success=true + 空列表"的错误行为。
-     * 这里统一抛出 {@link CollectorException}，由调用方按失败处理（触发重试或供应商切换）。
+     * ① 抛异常；② 返回 {@code status != STATUS_SUCCESS}。
+     * 该判定已上移到 {@link ProviderInvocationPipeline}（它必须在重试/熔断/统计之内，
+     * 而这里同时承担落库职责，不适合做判定），因此本方法收到的 entity 必定是成功的。
      */
     private CommentCollectResult toResult(CommentCollectRequest request, String providerKey,
                                           CommonEntity<Comment> entity) {
-        if (entity == null) {
-            throw new CollectorException("供应商 [" + providerKey + "] 返回 null");
-        }
-        if (entity.getStatus() != CommonStatusEnum.STATUS_SUCCESS) {
-            throw new CollectorException("供应商 [" + providerKey + "] 返回失败状态: " + entity.getStatus()
-                    + (entity.getMsg() == null ? "" : " / " + entity.getMsg()));
-        }
         List<Comment> comments = entity.getDataList() == null ? Collections.emptyList() : entity.getDataList();
         persist(request, providerKey, comments);
         return CommentCollectResult.builder()

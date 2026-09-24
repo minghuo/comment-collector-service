@@ -6,6 +6,8 @@ import com.bewilder.tools.CommonTools;
 import com.sysj.collector.constants.GolaxyConstants;
 import com.sysj.collector.core.provider.support.ProviderUrls;
 import com.sysj.collector.core.provider.CommentProvider;
+import com.sysj.collector.core.provider.Capability;
+import com.sysj.collector.core.provider.ProviderCapability;
 import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
@@ -34,6 +36,7 @@ import java.util.Map;
  *   <li>{@code commentId} —— 父评论 id，传了则采子评论</li>
  * </ul>
  */
+@ProviderCapability({ Capability.COMMENT, Capability.SUB_COMMENT, Capability.CURSOR_PAGING, Capability.SYNC_SUPPORTED })
 @Slf4j
 @Component("xhs_golaxy")
 public class XhsGolaxyCrawlerProvider implements CommentProvider {

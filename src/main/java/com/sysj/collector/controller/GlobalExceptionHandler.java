@@ -1,6 +1,7 @@
 package com.sysj.collector.controller;
 
 import com.sysj.collector.exception.CollectorException;
+import com.sysj.collector.exception.ProviderInvocationException;
 import com.sysj.collector.exception.QueueFullException;
 
 import com.fasterxml.jackson.databind.JsonMappingException;
@@ -44,6 +45,27 @@ public class GlobalExceptionHandler {
                         "queueSize", e.getQueueSize(),
                         "queueCapacity", e.getQueueCapacity(),
                         "queueRemaining", e.getRemaining())));
+    }
+
+    /**
+     * 供应商不可用 → 503（**服务端依赖问题，不是调用方的请求错误**）。
+     *
+     * <p>与 {@code CollectorException → 400} 的分工：400 表示"你的请求有问题，改了再来"，
+     * 503 表示"你的请求没问题，是我依赖的下游撑不住，稍后重试"。
+     * 二者混用会让调用方做出错误的处置（重试一个永远不会成功的坏参数，或放弃一个只是暂时过载的正确请求）。
+     *
+     * <p>本处理器只覆盖**指定供应商**（{@code specifiedProviderKey}）这条直连路径 ——
+     * 走候选列表的路径失败时由门面切换下一个供应商，只有全部候选都不可用才会以
+     * {@code CollectorException}（400）的形式回到这里（附带每个候选的失败原因）。
+     */
+    @ExceptionHandler(ProviderInvocationException.class)
+    public ResponseEntity<Map<String, Object>> handleProviderUnavailable(ProviderInvocationException e) {
+        log.warn("供应商不可用: provider={} type={} message={}",
+                e.getProviderKey(), e.getClass().getSimpleName(), e.getMessage());
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(body("PROVIDER_UNAVAILABLE", e.getMessage(), Map.of(
+                        "providerKey", e.getProviderKey() == null ? "" : e.getProviderKey(),
+                        "reason", e.getClass().getSimpleName())));
     }
 
     /** 业务参数/执行异常 → 400。 */

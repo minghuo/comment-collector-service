@@ -64,6 +64,16 @@ public class PlatformFeatureConfigDao {
         return mongoTemplate.find(query, PlatformFeatureConfig.class);
     }
 
+    /**
+     * 查询**全部**功能配置（含 status=false）。
+     *
+     * <p>供启动期一致性校验使用：停用的配置也要校验，
+     * 否则"停用期间改坏了 key，等启用时才炸"。
+     */
+    public List<PlatformFeatureConfig> findAll() {
+        return mongoTemplate.find(new Query(), PlatformFeatureConfig.class);
+    }
+
     // ── 供应商数组内元素的精确更新（$ 位置操作符） ─────────────────────────
 
     /**

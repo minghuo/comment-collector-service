@@ -4,6 +4,8 @@ import cn.hutool.core.collection.CollUtil;
 import com.bewilder.parser.CommonParser;
 import com.bewilder.tools.CommonTools;
 import com.sysj.collector.core.provider.CommentProvider;
+import com.sysj.collector.core.provider.Capability;
+import com.sysj.collector.core.provider.ProviderCapability;
 import com.sysj.collector.core.provider.support.ProviderHeaders;
 import com.sysj.collector.exception.CollectorException;
 import com.sysj.collector.model.Comment;
@@ -36,6 +38,7 @@ import java.util.Map;
  *   <li>{@code nextId} —— 上一页返回的 {@code next_cursor}（首次不传）</li>
  * </ul>
  */
+@ProviderCapability({ Capability.COMMENT, Capability.PAGE_PAGING, Capability.CURSOR_PAGING, Capability.LOGIN_STATE, Capability.PROXY, Capability.SYNC_SUPPORTED })
 @Slf4j
 @Component("weibo_repost_local")
 public class WeiboRepostCrawlerProvider implements CommentProvider {

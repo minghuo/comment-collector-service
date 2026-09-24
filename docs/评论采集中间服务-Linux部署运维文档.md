@@ -1,6 +1,6 @@
 # 评论采集中间服务 · Linux 部署运维文档
 
-> 版本：v1.0 ｜ 日期：2026-09-23
+> 版本：v1.1 ｜ 日期：2026-09-24
 > 适用对象：`comment-collector-service`（Spring Boot 单体，单实例部署）
 > 接口说明见 `评论采集中间服务-接口使用文档.md`；设计说明见 `评论采集中间服务-总体设计文档.md`
 
@@ -169,6 +169,25 @@ collector.ratelimit.warm-up-seconds=30
 # effective_qps / adaptive_delay_ms 写回 supplier_state 的节流间隔
 collector.ratelimit.persist-interval-seconds=30
 
+# ===== 供应商调用管线（可选，有默认值）=====
+# 装配顺序：Bulkhead → CircuitBreaker → RateLimit → Retry → Timeout
+# 总开关；置 false 时所有阶段直连供应商（压测/排障用）
+collector.pipeline.enabled=true
+# 单次调用超时（毫秒）；供应商配置 providers[].timeout_ms 优先，0 = 不限时。
+# ⚠️ 不要大于 http-client-utils 的 OkHttp callTimeout（默认 60000ms），
+#    否则"超时返回"只是调用方放弃等待，底层请求仍在跑。
+collector.pipeline.timeout-ms=15000
+# 默认并发上限（Bulkhead）；供应商配置 providers[].max_concurrency 优先，0 = 不限。
+# 满了立即失败（不排队），由门面切换到下一个候选。
+collector.pipeline.default-max-concurrency=4
+# 限时工作线程数上限；<=0 = 按 CPU 自动（max(64, availableProcessors × 8)）
+collector.pipeline.timeout-threads=0
+# 重试退避基数（毫秒）：第 n 次重试等待 base × 2^(n-1)
+collector.pipeline.retry-backoff-base-ms=500
+# 分阶段开关（压测逐项隔离）
+collector.pipeline.bulkhead-enabled=true
+collector.pipeline.timeout-enabled=true
+
 # ===== 日志 =====
 logging.level.root=info
 logging.level.com.sysj.collector=info
@@ -181,6 +200,15 @@ logging.level.com.sysj.collector=info
 （例如一天只采几次）很容易在几次失败后就达到 100% 失败率。这类供应商应把 `minimum-calls` 调大、
 或把 `sliding-window-size` 调小以让窗口更快滑出历史失败。
 `open-seconds` 决定故障供应商被隔离多久，恢复靠 `HALF_OPEN` 探测自动完成，无需人工干预。
+
+**管线参数调优提示（2026-09-24 新增）**：
+
+| 现象 | 调整 |
+|---|---|
+| 上游正常但偶发超过 15s | 调大 `collector.pipeline.timeout-ms`（或该供应商的 `providers[].timeout_ms`），**上限别超过 60000** |
+| 单供应商被并发压垮（上游 429/超时） | 调小 `providers[].max_concurrency`；它是"在途上限"，比速率限制更直接 |
+| 一个供应商失败时整个请求变慢 | 检查 `providers[].max_retry`：本项目 9 个供应商都用 `status` 表达失败，**确定性失败也会重试 `max_retry` 次**；确定性错误的供应商建议配 0 或 1 |
+| 大量 `限时线程池已满` | 调大 `collector.pipeline.timeout-threads`（或置 0 让它按 CPU 自动），并检查是否有供应商长时间挂住 |
 
 ### 4.3 用环境变量覆盖（推荐用于密码）
 
@@ -415,6 +443,9 @@ sudo journalctl -u comment-collector --since today > /tmp/cc.log
 | 关键字 | 含义 |
 |---|---|
 | `防饥饿调度参数` | 启动时打印，确认调度参数加载成功 |
+| `能力校验通过` | 启动时打印，供应商的 `@ProviderCapability` 注解与 DB `capabilities` 完全一致 |
+| `能力校验不一致` | **需要处理**：DB 少声明/多声明了能力，或含无法识别的能力名（日志会指明改哪边） |
+| `能力校验：… 找不到对应 Bean` | **需要处理**：DB 的 `provider_key` 与 `@Component("...")` 名字不一致（对应 C-24） |
 | `自适应限速参数` | 启动时打印，确认自适应限速参数加载成功 |
 | `自适应延迟调整` | DEBUG 级；已把延迟从 X 调到 Y（用 `logging.level.com.sysj.collector=debug` 打开） |
 | `熔断恢复，重置自适应预热` | 供应商从 OPEN 恢复，速率会从低位爬升（正常，防二次熔断） |
@@ -434,6 +465,15 @@ sudo journalctl -u comment-collector --since today > /tmp/cc.log
 | `半开探测超时未回收，重新发放探测名额` | 探测名额被领走但没回结果，已自动补发（属罕见告警，频繁出现说明候选常被限流跳过） |
 | `从 DB 恢复熔断状态` | 重启后恢复了此前的 OPEN 状态（正常，说明状态持久化生效） |
 | `insertAll 失败，退化为逐条 save` | 批量写入有 `_id` 冲突，已自动降级 |
+| `供应商调用管线已装配` | **启动时打印**，确认阶段顺序与生效的 `timeout` / 默认并发上限（管线是供应商调用的唯一边界） |
+| `Bulkhead 额度初始化: key=… maxConcurrency=…` | 该供应商的并发上限（来自 `providers[].max_concurrency`，缺省用全局默认） |
+| `初始化限流器: key=… rate=…/s` | 该供应商的静态速率上限 |
+| `并发已达上限（在途 N，上限 M），不再排队` | Bulkhead 快速失败（HTTP 503 `PROVIDER_UNAVAILABLE`）。**属预期保护**；持续出现说明该供应商并发配置偏小或上游变慢 |
+| `熔断闸门拒绝: key=… state=OPEN` | 执行前闸门拦截，**没有发起这次调用**（与路由的择优过滤不同，这里是权威判定） |
+| `未触达供应商，跳过运行时状态上报`（DEBUG） | 保护性拒绝（Bulkhead/限流/熔断闸门）**不计入熔断失败率** —— 这是正确行为（C-44），不要当成丢日志 |
+| `单次调用超时（> Nms）` / `调用链总预算耗尽（Nms 内已尝试 M 次）` | 前者是单次尝试超时、后者是整条重试链预算用完；排障时优先看"单次" |
+| `限时线程池已满` | 管线限时线程池打满，调用被立即拒绝（不排队）；调大 `collector.pipeline.timeout-threads` |
+| `供应商不可用: provider=… type=… message=…` | 指定供应商路径以 503 `PROVIDER_UNAVAILABLE` 返回，`type` 是异常类名（定位用） |
 
 ---
 
@@ -503,12 +543,21 @@ sudo systemctl start comment-collector
 | 采集变慢但没报错 | 自适应限速在工作：查 `supplier_state.effective_qps` 与 `adaptive_delay_ms` | 这是**预期行为**（上游慢 → 自动降速）。持续偏低说明上游确实慢，或 `max_delay_ms` 偏低；排障时可用 `collector.ratelimit.adaptive-enabled=false` 临时隔离本机制 |
 | 某供应商被 `限流拒绝` 频繁跳过 | 有效速率已降到很低 | 若该供应商其实健康，检查是否单次耗时被内部重试放大（`latency` 是整条重试链的时长）；可调 `target_concurrency` 或 `max_delay_ms` |
 | 想"宁可排队也不要跳过" | 该供应商配 `flow_effect=THROTTLE_QUEUE` + `max_queue_wait_ms` | 适用于"慢但稳、且没有备用供应商"的场景；注意排队会占用消费者线程 |
+| 请求报 `无候选满足所需能力 [X]` | 调用方带了 `requiredCapabilities`，但没有候选全部具备 | 按日志里列出的"实际候选能力"补 DB `capabilities`，或让调用方去掉/放宽该要求。**不是故障** |
+| 启动日志有 `能力校验不一致` | DB 的 `capabilities` 与实现类注解不一致 | 按日志提示改 DB 或改代码；**只是告警不阻断启动**，但会导致路由选到不具备该能力的供应商 |
 | 单个任务报 `当前无可用供应商，请稍后重试` | 该功能下**全部**候选都被熔断或运维下线 | 查 `platform_feature_config.providers[].is_healthy` 与各供应商的 `circuit_state` |
 | 供应商频繁在 OPEN/CLOSED 间抖动 | 调用量小，`minimum-calls` 太低导致几次失败就触发 | 调大 `collector.circuit.minimum-calls`，或调小 `sliding-window-size` 让窗口更快滑出历史失败 |
 | 大量 `POST /api/tasks` 返回 **503** | 过载保护生效：`GET /api/queue/status` 看 `queueRemaining` | 正常行为（宁可拒绝也不 OOM）。持续发生则调大 `collector.task.queue-capacity` / `collector.task.consumer-threads`，或在上游限流 |
 | `queue/status` 显示 `queueSize=0` 但仍报 503 | **不是 bug**：消费者取走任务后才开始执行，在途任务同样占名额 | 看 `queueRemaining` 而非 `queueSize` |
 | 重启后任务被重复灌入，想先排查 | 问题版本可能导致每重启一次就重灌一批任务 | 先设 `collector.recovery.enabled=false` 重启，排查完再打开 |
 | 返回 405 / 415 且带 `REQUEST_ERROR` | HTTP 方法或 `Content-Type` 用错（框架语义已保留，不再吞成 500） | 按提示改正请求 |
+| `POST /api/collect` 指定供应商时返回 **503** `PROVIDER_UNAVAILABLE` | 看响应体的 `providerKey` 与 `reason`（`BulkheadFullException` / `ProviderTimeoutException` / `RateLimitedException` / `ProviderInvocationException`） | **可重试**。这是有意设计：候选列表路径失败是 `200+success=false`（中间件已尽力切换），点名供应商失败是 503（重试才有意义） |
+| `reason=BulkheadFullException` 频繁出现 | 该供应商在途调用已达 `providers[].max_concurrency`（默认 4） | 调大 `providers[].max_concurrency`，或降低调用方并发；**不要指望它排队** —— 排队只会把"下游慢"变成"队列长" |
+| 报 `单次调用超时（> 15000ms）` | 上游响应慢于 `collector.pipeline.timeout-ms` | 调大超时（**上限 60000**，见 §4.2 的 OkHttp `callTimeout` 说明）；注意调大后并发占用时间同步变长 |
+| 报 `调用链总预算耗尽` | `timeout × (max_retry+1) + 退避总和` 用完 | 上游持续超时时重试只会更慢；优先排查上游，或把该供应商的 `max_retry` 调小 |
+| 一个供应商失败会拖慢整个请求 | 每个候选都会走完整条重试链（默认 `max_retry` 2~3） | 确定性失败的供应商把 `providers[].max_retry` 配 0/1；`collector.pipeline.retry-backoff-base-ms` 可整体缩短退避 |
+| 报 `限时线程池已满` | `collector.pipeline.timeout-threads` 打满（0 = 按 CPU 自动，`max(64, CPU×8)`） | 调大该值；同时排查是否有供应商长时间挂住（超时后底层 OkHttp 请求仍会继续跑，直到其 `callTimeout` 60s） |
+| 想看某供应商到底被调用了没 | grep `熔断闸门拒绝` / `未触达供应商，跳过运行时状态上报`（DEBUG） | 前者=闸门拦截未调用；后者=保护性拒绝未计入熔断（正常） |
 
 ---
 

@@ -42,6 +42,13 @@
 /**
  * 平台功能配置表：一个条目 = 一个「平台 + 功能」。
  * providers 按 priority 升序书写（数值越小越优先）。
+ *
+ * provider 字段（见设计文档 §6）：
+ *   provider_key / name / rate_per_second / max_retry / priority / is_healthy / capabilities
+ *   max_concurrency —— Bulkhead 并发上限（§8.1，借鉴 B-20）；
+ *                      经验值 ≈ rate_per_second × 预期响应秒数，再留一倍余量
+ *   timeout_ms      —— **单次调用**超时（§9.5，借鉴 B-03），不是整条重试链；
+ *                      整链预算 = timeout_ms × (max_retry + 1) + 退避总和
  */
 const FEATURE_CONFIGS = [
   {
@@ -50,9 +57,9 @@ const FEATURE_CONFIGS = [
     feature_name: '微博评论采集',
     providers: [
       // 中科天玑（Golaxy）微博评论接口（无需 Cookie）
-      { provider_key: 'weibo_official', name: '微博-中科天玑接口', rate_per_second: 1.0, max_retry: 3, priority: 10, is_healthy: true },
+      { provider_key: 'weibo_official', name: '微博-中科天玑接口', rate_per_second: 1.0, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 15000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
       // 微博网页版本地爬虫（需要在 requestParams 里传 cookie）
-      { provider_key: 'local_crawler', name: '微博-本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 20, is_healthy: true },
+      { provider_key: 'local_crawler', name: '微博-本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 20, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','CURSOR_PAGING','LOGIN_STATE','PROXY','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -60,7 +67,7 @@ const FEATURE_CONFIGS = [
     feature_code: 'repost',
     feature_name: '微博转发采集',
     providers: [
-      { provider_key: 'weibo_repost_local', name: '微博-转发本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true },
+      { provider_key: 'weibo_repost_local', name: '微博-转发本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','PAGE_PAGING','CURSOR_PAGING','LOGIN_STATE','PROXY','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -68,7 +75,7 @@ const FEATURE_CONFIGS = [
     feature_code: 'comment',
     feature_name: '微信公众号评论采集',
     providers: [
-      { provider_key: 'wechat_sy', name: '公众号-系统接口', rate_per_second: 1.0, max_retry: 3, priority: 10, is_healthy: true },
+      { provider_key: 'wechat_sy', name: '公众号-系统接口', rate_per_second: 1.0, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 15000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -76,7 +83,7 @@ const FEATURE_CONFIGS = [
     feature_code: 'comment',
     feature_name: '微信视频号评论采集',
     providers: [
-      { provider_key: 'wechat_video_sy', name: '视频号-系统接口', rate_per_second: 1.0, max_retry: 3, priority: 10, is_healthy: true },
+      { provider_key: 'wechat_video_sy', name: '视频号-系统接口', rate_per_second: 1.0, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 15000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -84,7 +91,7 @@ const FEATURE_CONFIGS = [
     feature_code: 'comment',
     feature_name: 'B站评论采集',
     providers: [
-      { provider_key: 'bilibili_golaxy', name: 'B站-中科天玑接口', rate_per_second: 1.0, max_retry: 3, priority: 10, is_healthy: true },
+      { provider_key: 'bilibili_golaxy', name: 'B站-中科天玑接口', rate_per_second: 1.0, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 15000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -92,7 +99,7 @@ const FEATURE_CONFIGS = [
     feature_code: 'comment',
     feature_name: '抖音评论采集',
     providers: [
-      { provider_key: 'douyin_golaxy', name: '抖音-中科天玑接口', rate_per_second: 1.0, max_retry: 3, priority: 10, is_healthy: true },
+      { provider_key: 'douyin_golaxy', name: '抖音-中科天玑接口', rate_per_second: 1.0, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 15000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -100,7 +107,7 @@ const FEATURE_CONFIGS = [
     feature_code: 'comment',
     feature_name: '小红书评论采集',
     providers: [
-      { provider_key: 'xhs_golaxy', name: '小红书-中科天玑接口', rate_per_second: 1.0, max_retry: 3, priority: 10, is_healthy: true },
+      { provider_key: 'xhs_golaxy', name: '小红书-中科天玑接口', rate_per_second: 1.0, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 15000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -108,7 +115,7 @@ const FEATURE_CONFIGS = [
     feature_code: 'comment',
     feature_name: '今日头条评论采集',
     providers: [
-      { provider_key: 'toutiao_local', name: '今日头条-本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true },
+      { provider_key: 'toutiao_local', name: '今日头条-本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','PROXY','SYNC_SUPPORTED'] },
     ],
   },
 ];

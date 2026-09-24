@@ -5,6 +5,8 @@ import com.bewilder.tools.CommonTools;
 import com.bewilder.tools.URLCodeUtil;
 import com.sysj.collector.constants.SyConstants;
 import com.sysj.collector.core.provider.CommentProvider;
+import com.sysj.collector.core.provider.Capability;
+import com.sysj.collector.core.provider.ProviderCapability;
 import com.sysj.collector.core.provider.support.ProviderHeaders;
 import com.sysj.collector.exception.CollectorException;
 import com.sysj.collector.model.Comment;
@@ -36,6 +38,7 @@ import java.util.Map;
  *   <li>{@code commentId} —— 父评论 id，传了则采该评论的回复</li>
  * </ul>
  */
+@ProviderCapability({ Capability.COMMENT, Capability.SUB_COMMENT, Capability.PAGE_PAGING, Capability.SYNC_SUPPORTED })
 @Slf4j
 @Component("wechat_video_sy")
 public class WechatVideoCommentCrawlerProvider implements CommentProvider {

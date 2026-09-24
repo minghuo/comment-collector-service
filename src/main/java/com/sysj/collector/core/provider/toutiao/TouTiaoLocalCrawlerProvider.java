@@ -5,6 +5,8 @@ import com.bewilder.parser.CommonParser;
 import com.bewilder.tools.CommonTools;
 import com.sysj.collector.core.provider.support.ProviderUrls;
 import com.sysj.collector.core.provider.CommentProvider;
+import com.sysj.collector.core.provider.Capability;
+import com.sysj.collector.core.provider.ProviderCapability;
 import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
@@ -35,6 +37,7 @@ import java.util.Map;
  *   <li>{@code commentId} —— 父评论 id，传了则采该评论的回复</li>
  * </ul>
  */
+@ProviderCapability({ Capability.COMMENT, Capability.SUB_COMMENT, Capability.PAGE_PAGING, Capability.PROXY, Capability.SYNC_SUPPORTED })
 @Slf4j
 @Component("toutiao_local")
 public class TouTiaoLocalCrawlerProvider implements CommentProvider {

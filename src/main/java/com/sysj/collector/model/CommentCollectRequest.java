@@ -56,6 +56,17 @@ public class CommentCollectRequest {
     /** 采集来源地址（原帖/原视频/原文链接），随结果一并落库。 */
     private String fromUrl;
 
+    /**
+     * 本次请求**要求具备**的能力（必须全部满足才作为候选），取值见 {@code core/provider/Capability}。
+     *
+     * <p>典型用法：要采二级评论 → {@code ["SUB_COMMENT"]}；
+     * 只有同步即时返回才可接受 → {@code ["SYNC_SUPPORTED"]}（对应原先无法判断的 FR-18）。
+     *
+     * <p>为空表示不限制。候选由路由在"健康/熔断过滤之后、激活阈值之前"按能力过滤；
+     * 若因此没有任何候选，会返回明确的"无候选满足所需能力"而不是笼统的"无可用供应商"。
+     */
+    private List<String> requiredCapabilities;
+
     /** 扩展参数（游标、页码、关键词等） */
     private Map<String, String> extra;
 }

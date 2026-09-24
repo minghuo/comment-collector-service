@@ -2,6 +2,7 @@ package com.sysj.collector.core.router;
 
 
 import com.sysj.collector.core.circuit.ProviderCircuitBreaker;
+import com.sysj.collector.core.provider.Capability;
 import com.sysj.collector.core.ratelimit.AdaptiveDelayPolicy;
 import com.sysj.collector.core.ratelimit.AdaptiveRateLimiter;
 import com.sysj.collector.core.ratelimit.FlowEffect;
@@ -75,53 +76,83 @@ public class DynamicProviderRouter {
      * @param featureCode        功能编码
      * @param allProviders       该功能下全部供应商（DB 返回，<b>顺序不作为路由依据</b>）
      * @param featurePreference  用户等级在此功能下的偏好配置，可为 null
-     * @param requiredProviderKey 强制指定的供应商 key；非空时跳过偏好/健康/阈值
+     * @param requiredProviderKey 强制指定的供应商 key；非空时跳过偏好/健康/阈值/能力
+     * @param requiredCapabilities 要求供应商**全部具备**的能力；空集表示不限制
      */
     public record RouteContext(
             String platformCode,
             String featureCode,
             List<ProviderConfig> allProviders,
             FeatureProviderConfig featurePreference,
-            String requiredProviderKey) {
+            String requiredProviderKey,
+            java.util.Set<Capability> requiredCapabilities) {
 
-        /** 常规路由（无强制指定供应商）。 */
+        /** 常规路由（无强制指定供应商、无能力要求）。 */
         public static RouteContext of(String platformCode, String featureCode,
                                       List<ProviderConfig> allProviders,
                                       FeatureProviderConfig featurePreference) {
-            return new RouteContext(platformCode, featureCode, allProviders, featurePreference, null);
+            return new RouteContext(platformCode, featureCode, allProviders, featurePreference,
+                    null, java.util.Collections.emptySet());
+        }
+
+        /** 常规路由 + 能力要求。 */
+        public static RouteContext of(String platformCode, String featureCode,
+                                      List<ProviderConfig> allProviders,
+                                      FeatureProviderConfig featurePreference,
+                                      java.util.Set<Capability> requiredCapabilities) {
+            return new RouteContext(platformCode, featureCode, allProviders, featurePreference,
+                    null, requiredCapabilities == null ? java.util.Collections.emptySet() : requiredCapabilities);
         }
 
         /** 强制指定供应商。 */
         public static RouteContext specified(String platformCode, String featureCode,
                                              List<ProviderConfig> allProviders,
                                              String requiredProviderKey) {
-            return new RouteContext(platformCode, featureCode, allProviders, null, requiredProviderKey);
+            return new RouteContext(platformCode, featureCode, allProviders, null,
+                    requiredProviderKey, java.util.Collections.emptySet());
+        }
+    }
+
+    /**
+     * 路由结果。
+     *
+     * @param candidates 可依次尝试的候选（可能为空）
+     * @param reason     候选为空时的**可诊断原因**；非空时为空串
+     */
+    public record RouteResult(List<ProviderConfig> candidates, String reason) {
+        public boolean isEmpty() {
+            return candidates.isEmpty();
         }
     }
 
     // ── 唯一路由入口 ───────────────────────────────────────────────────────
 
+    /** 便捷入口：只关心候选列表；需要失败原因时用 {@link #selectDetailed(RouteContext)}。 */
+    public List<ProviderConfig> select(RouteContext ctx) {
+        return selectDetailed(ctx).candidates();
+    }
+
     /**
-     * 选出本次请求可依次尝试的候选供应商（有序）。
+     * 选出本次请求可依次尝试的候选供应商（有序），并给出为空时的可诊断原因。
      *
-     * <p>返回空列表表示"当前无可用供应商"；调用方据此直接失败，无需再自行过滤。
-     * 候选列表已按 §7.1 的顺序完成：候选构建 → 健康过滤 → 阈值判断，
+     * <p>候选列表按 §7.1 的顺序产出：
+     * 候选构建 → 运维 kill switch → 熔断过滤 → **能力过滤** → 阈值判断。
      * 调用方只需按顺序执行 + 逐候选领取限流令牌。
      */
-    public List<ProviderConfig> select(RouteContext ctx) {
+    public RouteResult selectDetailed(RouteContext ctx) {
         List<ProviderConfig> all = ctx.allProviders();
         if (all == null || all.isEmpty()) {
             log.warn("功能未配置供应商: platform={} feature={}", ctx.platformCode(), ctx.featureCode());
-            return List.of();
+            return new RouteResult(List.of(), "该功能未配置供应商");
         }
 
-        // 1. 强制指定供应商：特殊需求，跳过偏好 / 健康 / 阈值
+        // 1. 强制指定供应商：特殊需求，跳过偏好 / 健康 / 阈值 / 能力
         if (ctx.requiredProviderKey() != null && !ctx.requiredProviderKey().isBlank()) {
             String required = ctx.requiredProviderKey();
             return all.stream()
                     .filter(p -> required.equals(p.getProviderKey()))
                     .findFirst()
-                    .map(List::of)
+                    .map(p -> new RouteResult(List.of(p), ""))
                     .orElseThrow(() -> new CollectorException("指定供应商不在配置列表中: " + required));
         }
 
@@ -145,23 +176,66 @@ public class DynamicProviderRouter {
             healthy.add(p);
         }
 
-        // 4. 激活阈值：待处理任务量不足时只允许候选首位（修正 C-18）
-        FeatureProviderConfig pref = ctx.featurePreference();
-        int threshold = pref != null ? pref.getActivationThreshold() : 0;
-        if (threshold > 0 && healthy.size() > 1) {
-            int pending = getPendingCount(ctx.platformCode(), ctx.featureCode());
-            if (pending < threshold) {
-                ProviderConfig first = healthy.get(0);
-                log.debug("未达激活阈值，仅启用首位供应商: platform={} feature={} pending={} threshold={} key={}",
-                        ctx.platformCode(), ctx.featureCode(), pending, threshold, first.getProviderKey());
-                healthy = List.of(first);
+        // 4. 能力过滤（§7.2）：要求"全部满足"。
+        //    放在健康过滤之后：健康是"能不能用"，能力是"合不合适"，先排除硬不可用再看匹配度。
+        java.util.Set<Capability> required = ctx.requiredCapabilities();
+        List<ProviderConfig> capable = healthy;
+        if (required != null && !required.isEmpty()) {
+            capable = new ArrayList<>(healthy.size());
+            for (ProviderConfig p : healthy) {
+                java.util.Set<Capability> has = p.capabilitySet();
+                // 未声明 capabilities 的供应商按"不限制"处理（向后兼容老配置）
+                if (has.isEmpty() || Capability.covers(has, required)) {
+                    capable.add(p);
+                } else {
+                    log.debug("供应商能力不匹配，跳过: key={} 需要={} 具备={}", p.getProviderKey(), required, has);
+                }
             }
         }
 
-        if (healthy.isEmpty()) {
-            log.error("所有供应商均不可用: platform={} feature={}", ctx.platformCode(), ctx.featureCode());
+        // 5. 激活阈值：待处理任务量不足时只允许候选首位（修正 C-18）
+        FeatureProviderConfig pref = ctx.featurePreference();
+        int threshold = pref != null ? pref.getActivationThreshold() : 0;
+        if (threshold > 0 && capable.size() > 1) {
+            int pending = getPendingCount(ctx.platformCode(), ctx.featureCode());
+            if (pending < threshold) {
+                ProviderConfig first = capable.get(0);
+                log.debug("未达激活阈值，仅启用首位供应商: platform={} feature={} pending={} threshold={} key={}",
+                        ctx.platformCode(), ctx.featureCode(), pending, threshold, first.getProviderKey());
+                capable = List.of(first);
+            }
         }
-        return healthy;
+
+        if (capable.isEmpty()) {
+            String reason = emptyReason(healthy, required);
+            log.error("所有供应商均不可用: platform={} feature={} 原因={}",
+                    ctx.platformCode(), ctx.featureCode(), reason);
+            return new RouteResult(List.of(), reason);
+        }
+        return new RouteResult(capable, "");
+    }
+
+    /**
+     * 给出"为什么没有候选"的可诊断原因。
+     *
+     * <p>刻意区分"能力不满足"与"全部不可用"：前者是**请求侧要求过高或配置缺能力**，
+     * 后者是**供应商侧故障**，处置完全不同（改请求/补配置 vs 等恢复/修上游）。
+     */
+    private String emptyReason(List<ProviderConfig> healthy, java.util.Set<Capability> required) {
+        if (healthy.isEmpty()) {
+            return "当前无可用供应商（全部被熔断隔离或运维下线）";
+        }
+        if (required != null && !required.isEmpty()) {
+            StringBuilder sb = new StringBuilder("无候选满足所需能力 ").append(required).append("；实际候选能力: ");
+            for (int i = 0; i < healthy.size(); i++) {
+                if (i > 0) {
+                    sb.append(", ");
+                }
+                sb.append(healthy.get(i).getProviderKey()).append('=').append(healthy.get(i).capabilitySet());
+            }
+            return sb.toString();
+        }
+        return "当前无可用供应商";
     }
 
     // ── 候选列表构建 ───────────────────────────────────────────────────────
@@ -264,6 +338,24 @@ public class DynamicProviderRouter {
     }
 
     // ── 供应商运行时状态（熔断 + 自适应限速，统一上报入口） ────────────────
+
+    /**
+     * 熔断闸门：判断此刻是否允许向该供应商发起调用。
+     *
+     * <p>与 {@link #select} 里的熔断过滤是**两件事**：
+     * <ul>
+     *   <li>{@code select} 的过滤发生在"选候选"的时刻，作用是**择优** —— 不要把明显不通的候选排进来；</li>
+     *   <li>本方法发生在"真正执行"的时刻，作用是**闸门** —— 两刻之间可能隔着限流排队与候选遍历，
+     *       熔断器完全可能刚从 CLOSED 跳到 OPEN（典型 TOCTOU）。</li>
+     * </ul>
+     *
+     * <p><b>有副作用</b>：冷却期结束时会把状态推进到 HALF_OPEN 并占一个半开探测名额。
+     * 因此它不是幂等查询，**每条调用链只能调用一次**（由 {@code CircuitBreakerStage} 保证），
+     * 只读查询请用 {@link #circuitStateOf}。
+     */
+    public boolean allowProvider(String platformCode, String featureCode, String providerKey) {
+        return circuitBreaker.allowRequest(platformCode, featureCode, providerKey);
+    }
 
     /**
      * 上报一次调用结果 —— **熔断器与自适应限速的唯一上报入口**。

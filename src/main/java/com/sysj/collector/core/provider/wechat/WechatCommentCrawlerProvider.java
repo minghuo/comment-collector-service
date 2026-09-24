@@ -5,6 +5,8 @@ import com.bewilder.tools.CommonTools;
 import com.bewilder.tools.URLCodeUtil;
 import com.sysj.collector.constants.SyConstants;
 import com.sysj.collector.core.provider.CommentProvider;
+import com.sysj.collector.core.provider.Capability;
+import com.sysj.collector.core.provider.ProviderCapability;
 import com.sysj.collector.core.provider.support.ProviderHeaders;
 import com.sysj.collector.exception.CollectorException;
 import com.sysj.collector.model.Comment;
@@ -41,6 +43,7 @@ import java.util.Objects;
  * <p>注意：只接受<b>永久链接</b>（{@code mp.weixin.qq.com/s/xxx} 或带 32 位 {@code sn} 的
  * {@code mp.weixin.qq.com/s?__biz=...}），临时链接无法采到评论。
  */
+@ProviderCapability({ Capability.COMMENT, Capability.SUB_COMMENT, Capability.PAGE_PAGING, Capability.SYNC_SUPPORTED })
 @Slf4j
 @Component("wechat_sy")
 public class WechatCommentCrawlerProvider implements CommentProvider {

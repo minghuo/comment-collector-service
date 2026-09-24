@@ -3,6 +3,8 @@ package com.sysj.collector.core.provider.weibo;
 import cn.hutool.core.collection.CollUtil;
 import com.bewilder.parser.CommonParser;
 import com.sysj.collector.core.provider.CommentProvider;
+import com.sysj.collector.core.provider.Capability;
+import com.sysj.collector.core.provider.ProviderCapability;
 import com.sysj.collector.core.provider.support.ProviderHeaders;
 import com.sysj.collector.exception.CollectorException;
 import com.sysj.collector.model.Comment;
@@ -40,6 +42,7 @@ import java.util.Map;
  * <h3>返回</h3>
  * {@code haseMore} 表示还有下一页，{@code nextUrl} 为下一页 {@code maxId}（调用方回填到 {@code extra.maxId} 继续翻页）。
  */
+@ProviderCapability({ Capability.COMMENT, Capability.CURSOR_PAGING, Capability.LOGIN_STATE, Capability.PROXY, Capability.SYNC_SUPPORTED })
 @Slf4j
 @Component("local_crawler")
 public class WeiboLocalCrawlerProvider implements CommentProvider {
