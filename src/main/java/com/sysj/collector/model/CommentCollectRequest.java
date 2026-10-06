@@ -67,6 +67,17 @@ public class CommentCollectRequest {
      */
     private List<String> requiredCapabilities;
 
+    /**
+     * 本次请求**要求不具备**的能力（候选只要声明了其中任一项即被排除），取值见 {@code core/provider/Capability}。
+     *
+     * <p>典型用法：未提供登录态时排除 {@code ["LOGIN_STATE"]} —— 把"依赖 cookie 的本地采集供应商"
+     * 从候选里剔除，而不是让它先失败再靠切换兜底（每次无谓失败都会污染该供应商的熔断统计）。
+     *
+     * <p>与 {@link #requiredCapabilities} 的"必须全部满足"互补：required 是"没它不行"，
+     * excluded 是"有它不行"。为空表示不限制。
+     */
+    private List<String> excludedCapabilities;
+
     /** 扩展参数（游标、页码、关键词等） */
     private Map<String, String> extra;
 }

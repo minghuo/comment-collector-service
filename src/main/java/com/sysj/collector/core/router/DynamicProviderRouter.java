@@ -6,7 +6,7 @@ import com.sysj.collector.core.provider.Capability;
 import com.sysj.collector.core.ratelimit.AdaptiveDelayPolicy;
 import com.sysj.collector.core.ratelimit.AdaptiveRateLimiter;
 import com.sysj.collector.core.ratelimit.FlowEffect;
-import com.sysj.collector.core.ratelimit.ProviderRateLimitManager;
+
 
 import com.sysj.collector.domain.document.PlatformFeatureConfig;
 import com.sysj.collector.domain.document.PlatformFeatureConfig.ProviderConfig;
@@ -78,6 +78,7 @@ public class DynamicProviderRouter {
      * @param featurePreference  用户等级在此功能下的偏好配置，可为 null
      * @param requiredProviderKey 强制指定的供应商 key；非空时跳过偏好/健康/阈值/能力
      * @param requiredCapabilities 要求供应商**全部具备**的能力；空集表示不限制
+     * @param excludedCapabilities 要求供应商**不具备**（声明了其中任一项即排除）的能力；空集表示不限制
      */
     public record RouteContext(
             String platformCode,
@@ -85,14 +86,15 @@ public class DynamicProviderRouter {
             List<ProviderConfig> allProviders,
             FeatureProviderConfig featurePreference,
             String requiredProviderKey,
-            java.util.Set<Capability> requiredCapabilities) {
+            java.util.Set<Capability> requiredCapabilities,
+            java.util.Set<Capability> excludedCapabilities) {
 
         /** 常规路由（无强制指定供应商、无能力要求）。 */
         public static RouteContext of(String platformCode, String featureCode,
                                       List<ProviderConfig> allProviders,
                                       FeatureProviderConfig featurePreference) {
             return new RouteContext(platformCode, featureCode, allProviders, featurePreference,
-                    null, java.util.Collections.emptySet());
+                    null, java.util.Collections.emptySet(), java.util.Collections.emptySet());
         }
 
         /** 常规路由 + 能力要求。 */
@@ -100,8 +102,25 @@ public class DynamicProviderRouter {
                                       List<ProviderConfig> allProviders,
                                       FeatureProviderConfig featurePreference,
                                       java.util.Set<Capability> requiredCapabilities) {
+            return of(platformCode, featureCode, allProviders, featurePreference,
+                    requiredCapabilities, java.util.Collections.emptySet());
+        }
+
+        /**
+         * 常规路由 + 双向能力约束。
+         *
+         * @param requiredCapabilities 必须全部具备；空集不限制
+         * @param excludedCapabilities 声明了其中任一项即排除；空集不限制
+         */
+        public static RouteContext of(String platformCode, String featureCode,
+                                      List<ProviderConfig> allProviders,
+                                      FeatureProviderConfig featurePreference,
+                                      java.util.Set<Capability> requiredCapabilities,
+                                      java.util.Set<Capability> excludedCapabilities) {
             return new RouteContext(platformCode, featureCode, allProviders, featurePreference,
-                    null, requiredCapabilities == null ? java.util.Collections.emptySet() : requiredCapabilities);
+                    null,
+                    requiredCapabilities == null ? java.util.Collections.emptySet() : requiredCapabilities,
+                    excludedCapabilities == null ? java.util.Collections.emptySet() : excludedCapabilities);
         }
 
         /** 强制指定供应商。 */
@@ -109,7 +128,7 @@ public class DynamicProviderRouter {
                                              List<ProviderConfig> allProviders,
                                              String requiredProviderKey) {
             return new RouteContext(platformCode, featureCode, allProviders, null,
-                    requiredProviderKey, java.util.Collections.emptySet());
+                    requiredProviderKey, java.util.Collections.emptySet(), java.util.Collections.emptySet());
         }
     }
 
@@ -176,19 +195,25 @@ public class DynamicProviderRouter {
             healthy.add(p);
         }
 
-        // 4. 能力过滤（§7.2）：要求"全部满足"。
+        // 4. 能力过滤（§7.2）：要求"全部满足"，且"不得具备被排除项"。
         //    放在健康过滤之后：健康是"能不能用"，能力是"合不合适"，先排除硬不可用再看匹配度。
         java.util.Set<Capability> required = ctx.requiredCapabilities();
+        java.util.Set<Capability> excluded = ctx.excludedCapabilities();
+        boolean hasConstraints = (required != null && !required.isEmpty())
+                || (excluded != null && !excluded.isEmpty());
         List<ProviderConfig> capable = healthy;
-        if (required != null && !required.isEmpty()) {
+        if (hasConstraints) {
             capable = new ArrayList<>(healthy.size());
             for (ProviderConfig p : healthy) {
                 java.util.Set<Capability> has = p.capabilitySet();
                 // 未声明 capabilities 的供应商按"不限制"处理（向后兼容老配置）
-                if (has.isEmpty() || Capability.covers(has, required)) {
+                if (has.isEmpty()
+                        || (Capability.covers(has, required)
+                            && (excluded == null || excluded.stream().noneMatch(has::contains)))) {
                     capable.add(p);
                 } else {
-                    log.debug("供应商能力不匹配，跳过: key={} 需要={} 具备={}", p.getProviderKey(), required, has);
+                    log.debug("供应商能力不匹配，跳过: key={} 需要={} 排除={} 具备={}",
+                            p.getProviderKey(), required, excluded, has);
                 }
             }
         }
@@ -207,7 +232,7 @@ public class DynamicProviderRouter {
         }
 
         if (capable.isEmpty()) {
-            String reason = emptyReason(healthy, required);
+            String reason = emptyReason(healthy, required, excluded);
             log.error("所有供应商均不可用: platform={} feature={} 原因={}",
                     ctx.platformCode(), ctx.featureCode(), reason);
             return new RouteResult(List.of(), reason);
@@ -221,12 +246,22 @@ public class DynamicProviderRouter {
      * <p>刻意区分"能力不满足"与"全部不可用"：前者是**请求侧要求过高或配置缺能力**，
      * 后者是**供应商侧故障**，处置完全不同（改请求/补配置 vs 等恢复/修上游）。
      */
-    private String emptyReason(List<ProviderConfig> healthy, java.util.Set<Capability> required) {
+    private String emptyReason(List<ProviderConfig> healthy, java.util.Set<Capability> required,
+                               java.util.Set<Capability> excluded) {
         if (healthy.isEmpty()) {
             return "当前无可用供应商（全部被熔断隔离或运维下线）";
         }
-        if (required != null && !required.isEmpty()) {
-            StringBuilder sb = new StringBuilder("无候选满足所需能力 ").append(required).append("；实际候选能力: ");
+        boolean hasRequired = required != null && !required.isEmpty();
+        boolean hasExcluded = excluded != null && !excluded.isEmpty();
+        if (hasRequired || hasExcluded) {
+            StringBuilder sb = new StringBuilder("无候选满足能力约束");
+            if (hasRequired) {
+                sb.append("（要求全部具备 ").append(required).append("）");
+            }
+            if (hasExcluded) {
+                sb.append("（要求不具备 ").append(excluded).append("）");
+            }
+            sb.append("；实际候选能力: ");
             for (int i = 0; i < healthy.size(); i++) {
                 if (i > 0) {
                     sb.append(", ");
@@ -314,13 +349,13 @@ public class DynamicProviderRouter {
      * 由调用方在**真正执行某个候选之前**调用。
      */
     public boolean tryAcquireProvider(String platformCode, String featureCode, ProviderConfig provider) {
-        String key = ProviderRateLimitManager.buildKey(platformCode, featureCode, provider.getProviderKey());
+        String key = AdaptiveRateLimiter.buildKey(platformCode, featureCode, provider.getProviderKey());
         return adaptiveRateLimiter.acquire(key, flowSpecOf(provider));
     }
 
     /** 当前有效速率（供监控/状态接口）。 */
     public double effectiveRateOf(String platformCode, String featureCode, ProviderConfig provider) {
-        String key = ProviderRateLimitManager.buildKey(platformCode, featureCode, provider.getProviderKey());
+        String key = AdaptiveRateLimiter.buildKey(platformCode, featureCode, provider.getProviderKey());
         return adaptiveRateLimiter.effectiveRate(key, flowSpecOf(provider));
     }
 
@@ -376,7 +411,7 @@ public class DynamicProviderRouter {
             circuitBreaker.recordFailure(platformCode, featureCode, providerKey, latencyMs);
         }
         adaptiveRateLimiter.recordOutcome(
-                ProviderRateLimitManager.buildKey(platformCode, featureCode, providerKey), latencyMs, success, params);
+                AdaptiveRateLimiter.buildKey(platformCode, featureCode, providerKey), latencyMs, success, params);
     }
 
     /** 查询供应商当前熔断状态（供运维接口）。 */

@@ -2,6 +2,8 @@ package com.sysj.collector.domain.document;
 
 import lombok.Data;
 import org.springframework.data.annotation.Id;
+import org.springframework.data.mongodb.core.index.CompoundIndex;
+import org.springframework.data.mongodb.core.index.CompoundIndexes;
 import org.springframework.data.mongodb.core.index.Indexed;
 import org.springframework.data.mongodb.core.mapping.Document;
 
@@ -17,6 +19,11 @@ import java.time.Instant;
  */
 @Data
 @Document(collection = "sub_task")
+@CompoundIndexes({
+        // 同一主任务下链接唯一（幂等去重的落库兜底；建任务时已先去重）。
+        // 注意 def 字符串不经过命名策略，必须写落库名
+        @CompoundIndex(name = "idx_master_link_unique", def = "{'master_task_id': 1, 'link': 1}", unique = true)
+})
 public class SubTask {
 
     @Id
@@ -49,6 +56,22 @@ public class SubTask {
 
     /** 已尝试过的供应商列表（JSON数组字符串），用于供应商切换 */
     private String attemptedProviders;
+
+    /**
+     * 自动翻页深度：1 = 首次提交，2+ = 续采第 N-1 轮。
+     *
+     * <p>续采子任务由框架在 {@code hasMore=true} 时自动创建（见 {@code TaskManagementService}），
+     * 深度达到 {@code collector.task.auto-paging.max-pages} 后不再续采。
+     */
+    private int pageCount;
+
+    /**
+     * 本子任务请求下一页所用的游标值（翻页深度 &gt; 1 时非空）。
+     *
+     * <p>游标类平台（微博 maxId / B站与小红书 cursor / 微信 buffer）存平台返回的下一页游标；
+     * 页码类平台（抖音/头条）存页码数字串。同时用于"游标未前进"的防死循环判定。
+     */
+    private String pageCursor;
 
     /** 执行结果（JSON字符串） */
     private String result;

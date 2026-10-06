@@ -48,33 +48,51 @@ import java.util.stream.Collectors;
 @Component
 public class ProviderInvocationPipeline {
 
-    /** 管线总开关；关闭时直接调用供应商（用于压测逐项隔离，见 §9.2）。 */
+    /** 管线总开关默认值（system_config 同名键可覆盖）：关闭时直接调用供应商（用于压测逐项隔离，见 §9.2）。 */
     @Value("${collector.pipeline.enabled:true}")
-    private boolean enabled;
+    private boolean enabledDefault;
 
-    /** 全局单次调用超时，毫秒；{@code providers[].timeout_ms} 优先。 */
+    /** 全局单次调用超时默认值，毫秒；{@code providers[].timeout_ms} 优先。 */
     @Value("${collector.pipeline.timeout-ms:15000}")
-    private long defaultTimeoutMs;
+    private long defaultTimeoutMsDefault;
 
-    /** 全局默认并发上限；{@code providers[].max_concurrency} 优先。0 = 不限。 */
+    /** 全局默认并发上限默认值；{@code providers[].max_concurrency} 优先。0 = 不限。 */
     @Value("${collector.pipeline.default-max-concurrency:4}")
-    private int defaultMaxConcurrency;
+    private int defaultMaxConcurrencyDefault;
 
     private final DynamicProviderRouter router;
     private final List<ProviderInvocationStage> stages;
+    private final com.sysj.collector.domain.service.SystemConfigService systemConfigService;
 
-    public ProviderInvocationPipeline(DynamicProviderRouter router, List<ProviderInvocationStage> stages) {
+    public ProviderInvocationPipeline(DynamicProviderRouter router, List<ProviderInvocationStage> stages,
+                                      com.sysj.collector.domain.service.SystemConfigService systemConfigService) {
         this.router = router;
         this.stages = stages == null ? List.of() : stages.stream()
                 .sorted(Comparator.comparingInt(ProviderInvocationStage::order))
                 .collect(Collectors.toList());
+        this.systemConfigService = systemConfigService;
+    }
+
+    // ── 动态配置读取（system_config 覆盖 properties 默认，60s 缓存） ────────
+
+    private boolean enabled() {
+        return systemConfigService.getBool("collector.pipeline.enabled", enabledDefault);
+    }
+
+    private long defaultTimeoutMs() {
+        return systemConfigService.getLong("collector.pipeline.timeout-ms", defaultTimeoutMsDefault);
+    }
+
+    private int defaultMaxConcurrency() {
+        return (int) systemConfigService.getLong("collector.pipeline.default-max-concurrency",
+                defaultMaxConcurrencyDefault);
     }
 
     @PostConstruct
     public void init() {
         log.info("供应商调用管线已装配: {} → provider.fetchComments | enabled={} timeout={}ms 默认并发上限={}",
-                describeChain(), enabled, defaultTimeoutMs,
-                defaultMaxConcurrency <= 0 ? "不限" : String.valueOf(defaultMaxConcurrency));
+                describeChain(), enabled(), defaultTimeoutMs(),
+                defaultMaxConcurrency() <= 0 ? "不限" : String.valueOf(defaultMaxConcurrency()));
     }
 
     /**
@@ -99,7 +117,7 @@ public class ProviderInvocationPipeline {
         // 供应商代码在限时阶段可能跑在别的线程上，因此这里必须是跨线程可见的
         AtomicBoolean attempted = new AtomicBoolean(false);
         try {
-            CommonEntity<Comment> entity = enabled
+            CommonEntity<Comment> entity = enabled()
                     ? runChain(ctx, () -> attempt(ctx, impl, request, attempted))
                     : attempt(ctx, impl, request, attempted);
             success = true;
@@ -142,9 +160,9 @@ public class ProviderInvocationPipeline {
      */
     public InvocationContext newContext(CommentCollectRequest request, ProviderConfig provider) {
         Long configuredTimeout = provider.getTimeoutMs();
-        long timeout = configuredTimeout != null ? configuredTimeout : defaultTimeoutMs;
+        long timeout = configuredTimeout != null ? configuredTimeout : defaultTimeoutMs();
         Integer configuredConcurrency = provider.getMaxConcurrency();
-        int maxConcurrency = configuredConcurrency != null ? configuredConcurrency : defaultMaxConcurrency;
+        int maxConcurrency = configuredConcurrency != null ? configuredConcurrency : defaultMaxConcurrency();
         return new InvocationContext(request, request.getPlatformCode(), request.getFeatureCode(),
                 provider, timeout, maxConcurrency, Math.max(0, provider.getMaxRetry()));
     }
@@ -192,6 +210,6 @@ public class ProviderInvocationPipeline {
     }
 
     public boolean isEnabled() {
-        return enabled;
+        return enabled();
     }
 }

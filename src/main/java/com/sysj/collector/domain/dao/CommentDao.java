@@ -4,6 +4,8 @@ import com.sysj.collector.domain.document.CommentDoc;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Sort;
+import org.springframework.data.mongodb.core.BulkOperations;
+import org.springframework.data.mongodb.core.FindAndReplaceOptions;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
@@ -36,22 +38,29 @@ public class CommentDao {
     }
 
     /**
-     * 批量保存。
+     * 批量保存（按业务主键 upsert，幂等）。
      *
-     * <p>与 auto-task-web 的写法一致：优先 {@code insertAll}，
-     * 一旦因 {@code _id} 冲突等原因失败，退化为逐条 {@code save}（upsert），保证不丢数据。
+     * <p>{@code _id} 即业务主键（{@code taskId-mid-commentId}，见 {@link CommentDoc}），
+     * 因此用 UNORDERED bulk {@code replaceOne + upsert} 而不是 {@code insertAll}：
+     * 任务重采/重试产生重复评论时**整批照常写入**（同键覆盖为最新一条），
+     * 而不是像 insertAll 那样整批失败再退化为逐条 save。
      *
-     * @return 实际写入条数
+     * @return 实际写入条数（upsert + modify）
      */
     public int saveAll(List<CommentDoc> docs) {
         if (docs == null || docs.isEmpty()) {
             return 0;
         }
         try {
-            mongoTemplate.insertAll(docs);
-            return docs.size();
+            BulkOperations ops = mongoTemplate.bulkOps(BulkOperations.BulkMode.UNORDERED, CommentDoc.class);
+            for (CommentDoc doc : docs) {
+                ops.replaceOne(new Query(Criteria.where("_id").is(doc.getId())), doc,
+                        FindAndReplaceOptions.options().upsert());
+            }
+            com.mongodb.bulk.BulkWriteResult result = ops.execute();
+            return (int) (result.getUpserts().size() + result.getModifiedCount());
         } catch (Exception e) {
-            log.warn("insertAll 失败，退化为逐条 save: size={} error={}", docs.size(), e.getMessage());
+            log.warn("批量 upsert 失败，退化为逐条 save: size={} error={}", docs.size(), e.getMessage());
             int saved = 0;
             for (CommentDoc doc : docs) {
                 try {

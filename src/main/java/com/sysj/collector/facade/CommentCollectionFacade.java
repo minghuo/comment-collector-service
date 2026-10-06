@@ -1,12 +1,10 @@
 package com.sysj.collector.facade;
 
 import com.sysj.collector.core.pipeline.ProviderInvocationPipeline;
+import com.sysj.collector.core.scheduler.PriorityTaskQueue;
 import com.sysj.collector.core.provider.Capability;
 import com.sysj.collector.core.provider.CommentProvider;
 import com.sysj.collector.core.router.DynamicProviderRouter;
-import com.sysj.collector.core.scheduler.FairQuotaPolicy;
-import com.sysj.collector.core.scheduler.Prioritized;
-import com.sysj.collector.core.scheduler.PriorityTaskQueue;
 import com.sysj.collector.domain.dao.CommentDao;
 import com.sysj.collector.domain.document.CommentDataType;
 import com.sysj.collector.domain.document.CommentDoc;
@@ -15,7 +13,7 @@ import com.sysj.collector.domain.document.PlatformFeatureConfig.ProviderConfig;
 import com.sysj.collector.domain.document.UserTierConfig;
 import com.sysj.collector.domain.document.UserTierConfig.FeatureProviderConfig;
 import com.sysj.collector.domain.service.ProviderConfigService;
-import com.sysj.collector.exception.CollectorException;
+import com.sysj.collector.domain.service.SystemConfigService;
 import com.sysj.collector.exception.ProviderInvocationException;
 import com.sysj.collector.exception.QueueFullException;
 import com.sysj.collector.metrics.TaskMetrics;
@@ -24,18 +22,23 @@ import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommentCollectResult;
 import com.sysj.collector.model.CommonEntity;
 import com.sysj.collector.model.CommonStatusEnum;
-
-import jakarta.annotation.PostConstruct;
-import jakarta.annotation.PreDestroy;
+import com.sysj.collector.model.QueuedTask;
 
 import lombok.extern.slf4j.Slf4j;
+
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Service;
 
-import java.time.Instant;
-import java.util.*;
-import java.util.concurrent.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 评论采集门面服务。
@@ -44,53 +47,30 @@ import java.util.concurrent.*;
  * 当当前供应商重试达 maxRetry 后自动切换到下一候选供应商。
  * 切换时排除已失败的供应商 key。
  *
- * <h3>防饥饿调度</h3>
+ * <h3>外置队列（阶段2：Redis Stream）</h3>
+ * 异步任务不再进 JVM 内存队列，而是序列化后写入 Redis Stream（{@link RedisTaskStream}）：
  * <ul>
- *   <li><b>Aging机制</b>：任务在队列中每等待 agingIntervalSeconds 秒提升一次优先级</li>
- *   <li><b>Deadline保障</b>：超过 maxWaitMinutes 未执行的任务自动提到最高优先级</li>
- *   <li><b>公平配额</b>：高优先级任务占比超过 fairQuotaThreshold 时，
- *       每个消费轮次至少分配 fairQuotaRatio 的处理能力给低优先级任务</li>
+ *   <li>提交与执行彻底分离——进程重启后未完成任务仍留在流里，由消费者组继续消费，
+ *       配合 XCLAIM 接管实现"重启任务稳定运行"；</li>
+ *   <li>优先级用 HIGH/LOW 两条流近似（{@link QueueTiers}），跨流顺序由
+ *       {@link AsyncTaskConsumer} 按公平配额选择；</li>
+ *   <li>容量在 XADD 的 Lua 脚本内原子检查，严格不超卖（{@code collector.task.queue-capacity}）；
+ *       {@link #reserveCapacity(int)} 是入口整批预检的快照；</li>
+ *   <li>投递是**至少一次**：处理完成才 XACK+XDEL，崩溃未确认的消息会被接管重投，
+ *       因此子任务终态写入与主任务计数必须幂等（见 TaskManagementService）。</li>
  * </ul>
  */
 @Slf4j
 @Service
 public class CommentCollectionFacade {
 
-    /** aging 检查间隔（秒）：等待每超过该时长提升一次优先级。 */
-    @Value("${collector.task.aging-interval-seconds:60}")
-    private int agingIntervalSeconds;
-
-    /** 每次 aging 提升的优先级数值（有效优先级 = basePriority - boost，数值越小越优先）。 */
-    @Value("${collector.task.aging-priority-boost:10}")
-    private int agingPriorityBoost;
-
-    /** 最长等待时长（分钟）：超过后直接提到最高优先级（deadline 保障）。 */
-    @Value("${collector.task.max-wait-minutes:30}")
-    private int maxWaitMinutes;
-
-    /** 公平配额：每个轮次留给低优先级任务的比例。 */
-    @Value("${collector.task.fair-quota-ratio:0.3}")
-    private double fairQuotaRatio;
-
-    /** 公平配额：高优先级任务占比达到该比例才启用配额。 */
-    @Value("${collector.task.fair-quota-threshold:0.7}")
-    private double fairQuotaThreshold;
-
-    /** 公平配额：有效优先级小于该值算"高优先级"（替代原先硬编码的 500）。 */
-    @Value("${collector.task.fair-quota-high-priority-bound:500}")
-    private int fairQuotaHighPriorityBound;
-
-    /** 公平配额：一个消费轮次的名额数。 */
-    @Value("${collector.task.fair-quota-batch-size:20}")
-    private int fairQuotaBatchSize;
-
-    /** 异步队列容量上限；超过则新的 ASYNC 提交被拒绝（过载保护，修正 C-19 的死配置）。 */
+    /** 异步队列容量上限；超过则新的异步提交被拒绝（过载保护）。 */
     @Value("${collector.task.queue-capacity:10000}")
     private int queueCapacity;
 
-    /** 消费者线程数；&lt;=0 表示按 CPU 自动（availableProcessors × 2）。 */
-    @Value("${collector.task.consumer-threads:0}")
-    private int consumerThreads;
+    /** 高优先级层级判定阈值（有效优先级小于该值进 HIGH 流）。 */
+    @Value("${collector.task.fair-quota-high-priority-bound:500}")
+    private int highPriorityBoundDefault;
 
     private final ProviderConfigService configService;
     private final DynamicProviderRouter router;
@@ -98,79 +78,45 @@ public class CommentCollectionFacade {
     private final ApplicationContext applicationContext;
     private final TaskMetrics taskMetrics;
     private final CommentDao commentDao;
+    private final RedisTaskStream taskStream;
+    private final SystemConfigService systemConfigService;
+    private final RedisHealthMonitor redisHealth;
 
     /**
-     * 异步任务队列：**出队时按当前有效优先级现算**，因此 aging / deadline 提升立即生效。
-     * 不再使用 {@code PriorityBlockingQueue}（它只在插入时堆化，元素优先级变化后不会重排）。
-     *
-     * <p>实例在 {@link #init()} 中创建：容量来自 {@code @Value}，构造阶段还没注入。
+     * 本地兜底队列（阶段2.5）：Redis 不可用时任务先落这里，恢复后由消费者回流到流。
+     * 复用出队现算优先级的有界队列（HIGH 先行）；容量与 Redis 流共用同一配置，
+     * 在 {@link #init()} 中创建（容量来自 @Value，构造阶段还没注入）。
      */
-    private PriorityTaskQueue<PrioritizedTask> taskQueue;
+    private PriorityTaskQueue<LocalEntry> localFallbackQueue;
 
-    /** 公平配额策略（由配置构造，在 {@link #init()} 中初始化）。 */
-    private FairQuotaPolicy fairQuotaPolicy;
-
-    /** 每个消费者线程独立的公平配额轮次状态（避免跨线程互相干扰）。 */
-    private final ThreadLocal<FairRound> fairRound = ThreadLocal.withInitial(FairRound::new);
-
-    /** 异步任务消费线程池（在 {@link #init()} 中按配置创建）。 */
-    private ExecutorService asyncExecutor;
-
-    /** Aging 检查定时器 */
-    private final ScheduledExecutorService agingScheduler;
+    /** 本地兜底队列的入队序号。 */
+    private final AtomicLong localSeq = new AtomicLong();
 
     public CommentCollectionFacade(ProviderConfigService configService,
                                    DynamicProviderRouter router,
                                    ProviderInvocationPipeline pipeline,
                                    ApplicationContext applicationContext,
                                    TaskMetrics taskMetrics,
-                                   CommentDao commentDao) {
+                                   CommentDao commentDao,
+                                   RedisTaskStream taskStream,
+                                   SystemConfigService systemConfigService,
+                                   RedisHealthMonitor redisHealth) {
         this.configService = configService;
         this.router = router;
         this.pipeline = pipeline;
         this.applicationContext = applicationContext;
         this.taskMetrics = taskMetrics;
         this.commentDao = commentDao;
-        this.agingScheduler = Executors.newSingleThreadScheduledExecutor(r ->
-                new Thread(r, "collector-aging-checker"));
+        this.taskStream = taskStream;
+        this.systemConfigService = systemConfigService;
+        this.redisHealth = redisHealth;
     }
 
-    /**
-     * 容器完成依赖与配置注入后再创建队列与后台线程。
-     *
-     * <p>放在 {@code @PostConstruct} 而不是构造函数里：队列容量、消费者线程数与公平配额
-     * 都来自 {@code @Value} 注入的配置项，构造阶段这些字段还没赋值。
-     */
-    @PostConstruct
+    /** 容量配置注入完成后创建有界兜底队列。 */
+    @jakarta.annotation.PostConstruct
     public void init() {
-        this.fairQuotaPolicy = new FairQuotaPolicy(
-                fairQuotaRatio, fairQuotaThreshold, fairQuotaHighPriorityBound, fairQuotaBatchSize);
-        // 有界队列：满时 offer 返回 false，入口据此返回 503，而不是无界堆积到 OOM
-        this.taskQueue = new PriorityTaskQueue<>(Math.max(0, queueCapacity));
-
-        int threads = consumerThreads > 0
-                ? consumerThreads
-                : Runtime.getRuntime().availableProcessors() * 2;
-        this.asyncExecutor = Executors.newFixedThreadPool(threads,
-                r -> new Thread(r, "collector-async-" + System.nanoTime()));
-
-        log.info("防饥饿调度参数: agingInterval={}s boost={} maxWait={}min | 公平配额 ratio={} threshold={} "
-                        + "highPriorityBound={} batchSize={}",
-                agingIntervalSeconds, agingPriorityBoost, maxWaitMinutes,
-                fairQuotaRatio, fairQuotaThreshold, fairQuotaHighPriorityBound, fairQuotaBatchSize);
-        log.info("过载保护与线程池: queueCapacity={} consumerThreads={}（{}）",
-                taskQueue.capacity(), threads, consumerThreads > 0 ? "来自配置" : "按 CPU 自动");
-
-        startAsyncConsumer(threads);
-        startAgingChecker();
-    }
-
-    @PreDestroy
-    public void shutdown() {
-        if (asyncExecutor != null) {
-            asyncExecutor.shutdown();
-        }
-        agingScheduler.shutdown();
+        this.localFallbackQueue = new PriorityTaskQueue<>(Math.max(0, queueCapacity));
+        log.info("本地兜底队列就绪: capacity={}（Redis 故障时接管任务提交与消费）", queueCapacity);
     }
 
     // ── 同步采集 ───────────────────────────────────────────────────────────
@@ -179,88 +125,176 @@ public class CommentCollectionFacade {
         return doCollect(request);
     }
 
-    // ── 异步采集（带优先级队列 + 防饥饿 + 过载保护） ────────────────────────
+    // ── 异步采集（Redis Stream 外置队列 + 本地兜底） ────────────────────────
 
     /**
-     * 提交异步任务（**非原子**：内部先预留 1 个名额）。
+     * 提交异步任务：序列化后 XADD 到对应层级的流（Lua 内原子容量检查）。
      *
-     * <p>并发突发下，多个请求可能同时通过入口检查；能否受理最终由这里的原子预留决定。
-     * 需要"整批受理或整批拒绝"的调用方请先用 {@link #reserveCapacity(int)}。
+     * <p><b>Redis 降级兜底</b>：Redis 不可用（故障标记或操作异常）时任务落入
+     * {@link #localFallbackQueue}，由消费者在本实例直接消化；Redis 恢复后由消费者的
+     * 回流任务重新入队。兜底队列是**内存态**——降级期间进程崩溃会丢消息，
+     * 但子任务在 Mongo 里是 RUNNING，启动恢复扫描会重新提交，不产生永久丢失。
      *
-     * @throws QueueFullException 队列已满
+     * <p>提交后**没有返回 Future**——执行方是消费者组（可能不在本实例），
+     * 结果回写由消费者完成后经 {@link TaskResultListener} 通知任务管理服务。
+     *
+     * @return 消息 ID（降级入队时为 {@code local:序号}）
+     * @throws QueueFullException 队列容量已满（Redis 容量或本地兜底容量）
      */
-    public CompletableFuture<CommentCollectResult> collectAsync(CommentCollectRequest request) {
-        if (!taskQueue.tryReserve(1)) {
+    public String enqueueAsync(CommentCollectRequest request) {
+        int userPriority = resolveUserPriority(request.getUserTierCode());
+        int bound = systemConfigService.getInt("collector.task.fair-quota-high-priority-bound",
+                highPriorityBoundDefault);
+        String tier = QueueTiers.of(userPriority, bound);
+        QueuedTask task = QueuedTask.of(request, tier);
+
+        if (redisHealth.isAvailable()) {
+            try {
+                String messageId = taskStream.enqueue(task);
+                taskMetrics.recordTaskSubmitted();
+                log.debug("任务入队: userId={} tier={} priority={} messageId={} queueSize={}/{}",
+                        request.getUserId(), tier, userPriority, messageId,
+                        taskStream.totalLength(), queueCapacity);
+                return messageId;
+            } catch (QueueFullException qfe) {
+                throw qfe;  // 真实容量已满，转发过载语义
+            } catch (Exception e) {
+                redisHealth.markFailure("enqueue", e);
+                // 落到下面的本地兜底
+            }
+        }
+        return enqueueLocal(task, userPriority);
+    }
+
+    /** 降级入队：本地有界队列，满则 503。 */
+    private String enqueueLocal(QueuedTask task, int userPriority) {
+        LocalEntry entry = new LocalEntry(task, QueueTiers.HIGH.equals(task.getTier()) ? 0 : 999,
+                localSeq.incrementAndGet());
+        if (!localFallbackQueue.offer(entry)) {
             throw queueFull();
         }
-        return collectAsyncReserved(request);
-    }
-
-    /**
-     * 提交异步任务，**使用调用方已预留的名额**（不再尝试预留）。
-     *
-     * <p>配合 {@link #reserveCapacity(int)} 实现"整批受理或整批拒绝"：
-     * 入口一次性预留本次请求的全部链接名额，之后逐个提交绝不会因容量失败。
-     */
-    public CompletableFuture<CommentCollectResult> collectAsyncReserved(CommentCollectRequest request) {
-        int userPriority = resolveUserPriority(request.getUserTierCode());
-        CompletableFuture<CommentCollectResult> future = new CompletableFuture<>();
-        PrioritizedTask task = new PrioritizedTask(
-                userPriority, taskQueue.nextSeq(), System.currentTimeMillis(), request, future);
-
-        taskQueue.offerReserved(task);
-
         taskMetrics.recordTaskSubmitted();
-        taskMetrics.setQueueSize(taskQueue.size());
-        log.debug("任务入队: userId={} tier={} priority={} queueSize={}/{}",
-                request.getUserId(), request.getUserTierCode(), userPriority,
-                taskQueue.size(), taskQueue.capacity());
-        return future;
+        log.warn("任务落入本地兜底队列: userId={} tier={} localSize={}（Redis 恢复后自动回流；"
+                + "降级期间进程崩溃由启动恢复扫描兜底）", task.getUserId(), task.getTier(), localFallbackQueue.size());
+        return "local:" + entry.seq;
     }
 
     /**
-     * 入口 fail-fast 过载检查：**原子预留**本次请求所需的全部名额。
+     * 入口 fail-fast 过载检查：**快照**判断"当前积压 + 本次所需"是否超容量。
      *
-     * <p>放在创建任何任务记录之前调用，因此拒绝时不会留下"主任务已建、子任务拆了一半"的脏数据。
+     * <p>真正的硬保证在 {@link RedisTaskStream#enqueue} 的 Lua 原子检查里（每条消息 XADD 时
+     * 单独校验，绝不超卖）。本方法的意义是让整批请求在建任务前就拿到 503，
+     * 避免出现"主任务已建、子任务逐个被拒"的半受理状态。
      *
-     * <p>为什么必须"原子预留"而不是"查一下剩余容量"：并发突发时所有请求几乎同时到达，
-     * 各自查容量都会看到还有余量 → 全部放行 → 过载保护失效（实测 10 并发全部 200 就是这个原因）。
-     *
-     * <p>为什么要求"整批都放得下"：否则一个 10 链接的请求会出现部分受理，
-     * 调用方既拿不到 503 也无法整批重试。宁可整批拒绝。
-     *
-     * <p>未被用掉的名额必须通过 {@link #releaseCapacity(int)} 归还。
+     * <p>Redis 不可用时退化为检查本地兜底队列余量（与 enqueue 的降级路径对齐）。
      *
      * @param needed 本次请求需要的队列名额（等于链接数）
-     * @throws QueueFullException 余量不足
+     * @throws QueueFullException 快照余量不足
      */
     public void reserveCapacity(int needed) {
-        if (!taskQueue.tryReserve(Math.max(1, needed))) {
-            throw queueFull();
+        int slots = Math.max(1, needed);
+        if (redisHealth.isAvailable()) {
+            try {
+                if (taskStream.hasCapacityFor(slots)) {
+                    return;
+                }
+                throw queueFull();
+            } catch (QueueFullException qfe) {
+                throw qfe;
+            } catch (Exception e) {
+                redisHealth.markFailure("hasCapacityFor", e);
+            }
+        }
+        // 降级：检查本地兜底队列余量
+        if (localFallbackQueue.remainingCapacity() < slots) {
+            throw new QueueFullException(localFallbackQueue.size(), queueCapacity,
+                    localFallbackQueue.remainingCapacity());
         }
     }
 
-    /** 构造队列满异常（统一带上 size / capacity / remaining 三个数字）。 */
-    private QueueFullException queueFull() {
-        return new QueueFullException(taskQueue.size(), taskQueue.capacity(), taskQueue.remainingCapacity());
-    }
-
-    /** 归还未使用的预留名额（配合 {@link #reserveCapacity(int)} 的 try/finally 使用）。 */
+    /** 归还未使用的预留名额。外置队列后 XADD 逐条原子校验容量，本方法**不再需要**，保留为空操作以兼容调用方。 */
     public void releaseCapacity(int unused) {
-        taskQueue.release(unused);
+        // no-op：容量在每条消息 XADD 时原子校验，无预留信号量需要归还
     }
 
-    /** 单名额的过载检查（等价于 {@code reserveCapacity(1)}，用于只提交一个任务的入口）。 */
-    public void ensureCapacity() {
-        reserveCapacity(1);
+    /** 构造队列满异常（统一带上 size / capacity / remaining 三个数字；Redis 不可用时按本地兜底队列口径）。 */
+    private QueueFullException queueFull() {
+        long size;
+        try {
+            size = taskStream.totalLength();
+        } catch (Exception e) {
+            size = localFallbackQueue.size();
+        }
+        return new QueueFullException((int) size, queueCapacity,
+                (int) Math.max(0, queueCapacity - size));
     }
 
     public int getQueueCapacity() {
-        return taskQueue.capacity();
+        return queueCapacity;
+    }
+
+    /** 当前积压量 = 流内未确认消息 + 本地兜底队列（降级期间的任务）。 */
+    public int getQueueSize() {
+        long remote = 0;
+        if (redisHealth.isAvailable()) {
+            try {
+                remote = taskStream.totalLength();
+            } catch (Exception e) {
+                redisHealth.markFailure("totalLength", e);
+            }
+        }
+        long overflow = (long) remote + localFallbackQueue.size();
+        return (int) Math.min(Integer.MAX_VALUE, overflow);
     }
 
     public int getRemainingCapacity() {
-        return taskQueue.remainingCapacity();
+        return Math.max(0, queueCapacity - getQueueSize());
+    }
+
+    // ── Redis 降级协作（消费者使用） ───────────────────────────────────────
+
+    /** Redis 是否可用（false = 降级模式，消费者转本地兜底队列）。 */
+    public boolean isRedisAvailable() {
+        return redisHealth.isAvailable();
+    }
+
+    /** 本地兜底队列积压量。 */
+    public int localFallbackSize() {
+        return localFallbackQueue.size();
+    }
+
+    /** 消费者从本地兜底队列取一条（按优先级，HIGH 先行）；空返回 null。 */
+    public QueuedTask pollLocalTask() {
+        LocalEntry entry = localFallbackQueue.poll();
+        return entry == null ? null : entry.task();
+    }
+
+    /** 回流失败时把任务放回本地兜底队列（尾部，极少发生：仅在回流预算内并发竞争时）。 */
+    public void offerLocalBack(QueuedTask task) {
+        LocalEntry entry = new LocalEntry(task, QueueTiers.HIGH.equals(task.getTier()) ? 0 : 999,
+                localSeq.incrementAndGet());
+        if (!localFallbackQueue.offer(entry)) {
+            // 本地队列也满了：放弃回插。该子任务在 Mongo 是 RUNNING，启动恢复扫描会重新提交
+            log.error("本地兜底队列已满且回流被拒，任务交由启动恢复扫描兜底: subTaskId={}", task.getSubTaskId());
+        }
+    }
+
+    /** 远端（Redis 流）剩余容量；Redis 不可用返回 0（消费者回流任务据此暂停）。 */
+    public int remoteRemainingCapacity() {
+        if (!redisHealth.isAvailable()) {
+            return 0;
+        }
+        try {
+            return Math.max(0, queueCapacity - (int) taskStream.totalLength());
+        } catch (Exception e) {
+            redisHealth.markFailure("totalLength", e);
+            return 0;
+        }
+    }
+
+    /** 直接把兜底任务重新入队到 Redis 流（回流任务专用；不做降级兜底，失败向上抛）。 */
+    public String enqueueRemote(QueuedTask task) {
+        return taskStream.enqueue(task);
     }
 
     private int resolveUserPriority(String tierCode) {
@@ -270,134 +304,14 @@ public class CommentCollectionFacade {
                 .orElse(999);
     }
 
-    // ── 异步消费循环（带公平配额） ─────────────────────────────────────────
-
-    private void startAsyncConsumer(int threads) {
-        for (int i = 0; i < threads; i++) {
-            asyncExecutor.submit(() -> {
-                while (!Thread.currentThread().isInterrupted()) {
-                    PrioritizedTask task = null;
-                    try {
-                        task = consumeWithFairQuota();
-                        if (task != null) {
-                            taskMetrics.setQueueSize(taskQueue.size());
-                            CommentCollectResult result = doCollect(task.request());
-                            task.future().complete(result);
-                            if (result.isSuccess()) {
-                                taskMetrics.recordTaskCompleted();
-                            } else {
-                                taskMetrics.recordTaskFailed();
-                            }
-                        }
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                    } catch (Exception e) {
-                        // 必须让 future 异常完成，否则调用方（含 TaskRecoveryService / 任务完成回调）会永久阻塞
-                        log.error("异步任务执行异常", e);
-                        if (task != null) {
-                            taskMetrics.recordTaskFailed();
-                            task.future().completeExceptionally(e);
-                        }
-                    }
-                }
-            });
-        }
-    }
+    // ── 核心采集逻辑（消费者线程与同步接口共用；带供应商切换） ──────────────
 
     /**
-     * 公平配额消费：从队列中取出一个任务。
-     *
-     * <p>规则见 {@link FairQuotaPolicy}：
-     * 高优先级占比达阈值时，每个消费轮次预留一部分名额给低优先级任务；
-     * 若此刻队列里没有低优先级任务，立即放弃本轮剩余预留，改为正常取任务，避免把高优先级饿死。
-     *
-     * <p>轮次状态放在 {@link ThreadLocal} 中，**每个消费者线程独立计数** ——
-     * 原先用共享的 AtomicBoolean/AtomicInteger 会让多个线程互相干扰。
+     * 执行一次采集（选供应商 + 管线调用 + 落库）。**只做采集本身**，
+     * 子任务/主任务状态回写由调用方负责（同步接口直接返回；消费者回调
+     * {@link TaskResultListener}）。
      */
-    private PrioritizedTask consumeWithFairQuota() throws InterruptedException {
-        FairRound round = fairRound.get();
-
-        // 轮次结束（或首次进入）时重新规划本轮
-        if (round.picksRemaining <= 0) {
-            List<PrioritizedTask> snapshot = taskQueue.snapshot();
-            int total = snapshot.size();
-            int highCount = 0;
-            for (PrioritizedTask t : snapshot) {
-                if (fairQuotaPolicy.isHighPriority(t.effectivePriority())) {
-                    highCount++;
-                }
-            }
-            round.picksRemaining = fairQuotaPolicy.batchSize();
-            round.lowPriorityRemaining = fairQuotaPolicy.lowPrioritySlots(total, highCount);
-            if (round.lowPriorityRemaining > 0) {
-                log.debug("公平配额轮次开始: total={} high={} 预留低优先级名额={}",
-                        total, highCount, round.lowPriorityRemaining);
-            }
-        }
-
-        // 本轮仍有预留名额 → 先捞低优先级任务
-        if (round.lowPriorityRemaining > 0) {
-            PrioritizedTask low = taskQueue.pollIf(
-                    t -> !fairQuotaPolicy.isHighPriority(t.effectivePriority()));
-            if (low != null) {
-                round.lowPriorityRemaining--;
-                round.picksRemaining--;
-                return low;
-            }
-            // 队列里已无低优先级任务：放弃本轮剩余预留，接下来正常取
-            round.lowPriorityRemaining = 0;
-        }
-
-        // 正常模式：取当前最优先任务（阻塞）
-        round.picksRemaining--;
-        return taskQueue.take();
-    }
-
-    // ── Aging 机制 ─────────────────────────────────────────────────────────
-
-    /**
-     * Aging 检查：周期性重算等待中任务的有效优先级。
-     *
-     * <p>因为 {@link PriorityTaskQueue} 在**出队时**才计算优先级，这里只需更新任务上的
-     * agingBoost / deadline 标记，下一次出队就会按新优先级排序 —— 不再需要"重新入队"。
-     */
-    private void startAgingChecker() {
-        agingScheduler.scheduleAtFixedRate(() -> {
-                    try {
-                        long now = System.currentTimeMillis();
-                        for (PrioritizedTask task : taskQueue.snapshot()) {
-                            long elapsedSeconds = (now - task.enqueueTime()) / 1000;
-
-                            // Deadline 保障：等待超过 maxWaitMinutes 的任务直接提到最高优先级
-                            if (elapsedSeconds > maxWaitMinutes * 60L) {
-                                if (!task.isDeadlineForced()) {
-                                    task.forceHighestPriority();
-                                    log.warn("Deadline保障触发: 任务等待{}秒, 提升到最高优先级", elapsedSeconds);
-                                }
-                                continue;
-                            }
-
-                            // Aging：每 agingIntervalSeconds 提升一次（阶梯递增）
-                            if (agingIntervalSeconds <= 0) {
-                                continue;
-                            }
-                            long boosts = elapsedSeconds / agingIntervalSeconds;
-                            int expectedBoost = (int) Math.min(Integer.MAX_VALUE, boosts * (long) agingPriorityBoost);
-                            if (expectedBoost > task.agingBoost()) {
-                                task.setAgingBoost(expectedBoost);
-                                log.debug("Aging提升: 任务等待{}秒, 提升{}点, 有效优先级={}",
-                                        elapsedSeconds, expectedBoost, task.effectivePriority());
-                            }
-                        }
-                    } catch (Exception e) {
-                        log.error("Aging检查异常", e);
-                    }
-                }, 30, Math.max(5, agingIntervalSeconds / 3), TimeUnit.SECONDS);
-    }
-
-    // ── 核心采集逻辑（带供应商切换） ──────────────────────────────────────
-
-    private CommentCollectResult doCollect(CommentCollectRequest request) {
+    public CommentCollectResult doCollect(CommentCollectRequest request) {
         String platform = request.getPlatformCode();
         String feature = request.getFeatureCode();
 
@@ -424,7 +338,9 @@ public class CommentCollectionFacade {
             // 4. 统一路由入口：候选构建 → 健康/熔断过滤 → 能力过滤 → 激活阈值
             DynamicProviderRouter.RouteResult routeResult = router.selectDetailed(
                     DynamicProviderRouter.RouteContext.of(platform, feature, allProviders,
-                            featurePreference, Capability.parse(request.getRequiredCapabilities())));
+                            featurePreference,
+                            Capability.parse(request.getRequiredCapabilities()),
+                            Capability.parse(request.getExcludedCapabilities())));
 
             List<ProviderConfig> candidates = routeResult.candidates();
             if (candidates.isEmpty()) {
@@ -604,95 +520,23 @@ public class CommentCollectionFacade {
                 .orElse(null);
     }
 
-    public int getQueueSize() {
-        return taskQueue.size();
-    }
+    // ── 本地兜底队列条目 ───────────────────────────────────────────────────
 
     /**
-     * 公平配额的轮次状态（每个消费者线程一份）。
+     * 兜底队列条目：包装 {@link QueuedTask} 以复用 {@link PriorityTaskQueue} 的
+     * "出队时现算优先级"（HIGH 层级任务优先消化）。
      */
-    private static final class FairRound {
-        /** 本轮剩余取任务名额。 */
-        private int picksRemaining;
-        /** 本轮剩余"留给低优先级"的名额。 */
-        private int lowPriorityRemaining;
-    }
-
-    // ── 优先级任务包装（带 Aging 支持） ────────────────────────────────────
-
-    /**
-     * 队列中的任务。
-     *
-     * <p>{@link #effectivePriority()} 是**现算**的（basePriority - agingBoost，被 deadline 强制时直接取 0），
-     * 而不是缓存字段 —— 这样 aging 一改 {@code agingBoost}，下一次出队立刻按新优先级排序。
-     */
-    private static final class PrioritizedTask implements Prioritized {
-
-        /** deadline 强制提权时的优先级（最高）。 */
-        private static final int FORCED_PRIORITY = 0;
-
-        private final int basePriority;
-        private final long seq;
-        private final long enqueueTime;
-        private final CommentCollectRequest request;
-        private final CompletableFuture<CommentCollectResult> future;
-
-        private volatile int agingBoost = 0;
-        private volatile boolean deadlineForced = false;
-
-        PrioritizedTask(int basePriority, long seq, long enqueueTime,
-                        CommentCollectRequest request,
-                        CompletableFuture<CommentCollectResult> future) {
-            this.basePriority = basePriority;
-            this.seq = seq;
-            this.enqueueTime = enqueueTime;
-            this.request = request;
-            this.future = future;
-        }
+    private record LocalEntry(QueuedTask task, int tierPriority, long seq)
+            implements com.sysj.collector.core.scheduler.Prioritized {
 
         @Override
         public int effectivePriority() {
-            if (deadlineForced) {
-                return FORCED_PRIORITY;
-            }
-            return Math.max(0, basePriority - agingBoost);
+            return tierPriority;
         }
 
         @Override
         public long enqueueSeq() {
             return seq;
-        }
-
-        CommentCollectRequest request() {
-            return request;
-        }
-
-        CompletableFuture<CommentCollectResult> future() {
-            return future;
-        }
-
-        long enqueueTime() {
-            return enqueueTime;
-        }
-
-        int agingBoost() {
-            return agingBoost;
-        }
-
-        void setAgingBoost(int boost) {
-            this.agingBoost = boost;
-        }
-
-        boolean isDeadlineForced() {
-            return deadlineForced;
-        }
-
-        void forceHighestPriority() {
-            this.deadlineForced = true;
-        }
-
-        int basePriority() {
-            return basePriority;
         }
     }
 }

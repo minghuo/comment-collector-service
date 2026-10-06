@@ -3,6 +3,7 @@ package com.sysj.collector.core.circuit;
 import com.sysj.collector.domain.dao.SupplierStateDao;
 import com.sysj.collector.domain.document.PlatformFeatureConfig;
 import com.sysj.collector.domain.document.SupplierState;
+import com.sysj.collector.domain.service.SystemConfigService;
 
 import jakarta.annotation.PostConstruct;
 
@@ -13,38 +14,30 @@ import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
-import java.util.ArrayDeque;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 供应商熔断器 —— 健康状态的**唯一读写入口**（修正 C-12）。
  *
- * <h3>修复的是什么</h3>
- * 此前健康状态读写分裂：{@code DynamicProviderRouter.markProviderFailure()} 写
- * {@code supplier_state.health_status}，而路由过滤读的是
- * {@code platform_feature_config.providers[].is_healthy} —— 两条数据通路，写的没人读；
- * 且没有任何恢复路径，供应商一旦被标记就永远 DOWN。
- *
- * <p>现在：
+ * <h3>阶段2：状态上移 Redis，多实例共享</h3>
+ * 此前状态是每实例一份内存（Mongo 只做写穿观测），多实例下"A 实例熔断、B 实例继续打"。
+ * 现在状态机/滑动窗口/半开名额全部在 Redis，由 {@link CircuitRedisState} 的 Lua 脚本
+ * **原子迁移**，所有实例看到同一份真相：
  * <ul>
- *   <li>{@code supplier_state.circuit_state} 是**唯一健康真相源**，本类的内存状态即时写穿到它；</li>
- *   <li>重启后从 DB 惰性恢复，OPEN 状态不会因为重启就丢失；</li>
- *   <li>有真正的恢复路径：{@code OPEN → (冷却) → HALF_OPEN → (探测全成功) → CLOSED}；</li>
- *   <li>{@code providers[].is_healthy} 降级为"运维强制下线的 kill switch"，
- *       与熔断状态**取与**（两者都放行才可用），不再承担运行时健康语义。</li>
+ *   <li>{@code supplier_state.circuit_state}（Mongo）保留为**观测副本**（写穿 + 节流），
+ *       供运维查看与 Redis 丢失后的播种恢复；</li>
+ *   <li>状态迁移即发 {@link CircuitStateChangedEvent}（本实例观测到迁移时发布）；
+ *       {@code providers[].is_healthy} 仍是运维 kill switch，与熔断状态取与（路由侧处理）；</li>
+ *   <li>Redis 被清空 → 从 Mongo 播种 OPEN，其余从 CLOSED 重新观察。</li>
  * </ul>
  *
- * <h3>并发模型</h3>
- * 每个 {@code platform:feature:providerKey} 一个 {@link Breaker}，
- * 状态变更在 Breaker 内部锁内完成；滑动窗口只保留最近 {@code slidingWindowSize} 次调用。
- *
- * <h3>写库节流</h3>
- * 每次调用都写 Mongo 代价过大。策略：**状态迁移一定立即落库**（rare，且必须持久），
- * 纯计数更新则按 {@code collector.circuit.persist-interval-seconds} 节流。
- * 代价是进程被 kill -9 时最多丢失一个节流窗口的计数（不影响熔断判定正确性，因为窗口本身在内存里）。
+ * <h3>统计口径</h3>
+ * {@code totalSuccess/totalFailure/avgResponseTime} 是**本实例本地累计**（聚合观测值，
+ * 不参与熔断判定——判定只看 Redis 共享窗口），Mongo 里因此是各实例的近似聚合。
  */
 @Slf4j
 @Component
@@ -52,9 +45,13 @@ public class ProviderCircuitBreaker {
 
     private final SupplierStateDao supplierStateDao;
     private final ApplicationEventPublisher eventPublisher;
+    private final SystemConfigService systemConfigService;
+    private final CircuitRedisState redisState;
+
+    // ── 以下 @Value 仅为**默认值**：同名 system_config 键存在时以 DB 为准 ──
 
     @Value("${collector.circuit.enabled:true}")
-    private boolean enabled;
+    private boolean enabledDefault;
 
     @Value("${collector.circuit.failure-rate-threshold:50}")
     private double failureRateThreshold;
@@ -80,139 +77,213 @@ public class ProviderCircuitBreaker {
     @Value("${collector.circuit.persist-interval-seconds:30}")
     private long persistIntervalSeconds;
 
-    private CircuitBreakerConfig config;
-    private long persistIntervalMs;
+    /** 本实例本地累计（观测聚合）：supplierKey → totals。 */
+    private final ConcurrentHashMap<String, Totals> localTotals = new ConcurrentHashMap<>();
 
-    /** supplierKey → Breaker */
-    private final ConcurrentHashMap<String, Breaker> breakers = new ConcurrentHashMap<>();
+    /** 每供应商写库节流时间戳。 */
+    private final ConcurrentHashMap<String, Long> lastPersistAt = new ConcurrentHashMap<>();
 
     public ProviderCircuitBreaker(SupplierStateDao supplierStateDao,
-                                  ApplicationEventPublisher eventPublisher) {
+                                  ApplicationEventPublisher eventPublisher,
+                                  SystemConfigService systemConfigService,
+                                  CircuitRedisState redisState) {
         this.supplierStateDao = supplierStateDao;
         this.eventPublisher = eventPublisher;
+        this.systemConfigService = systemConfigService;
+        this.redisState = redisState;
     }
 
     @PostConstruct
     public void init() {
-        this.config = new CircuitBreakerConfig(
-                failureRateThreshold, slowCallMs, slowCallRateThreshold,
-                slidingWindowSize, minimumCalls, openSeconds, halfOpenCalls).sanitized();
-        this.persistIntervalMs = Math.max(0L, persistIntervalSeconds) * 1000L;
-        log.info("熔断器参数: enabled={} 失败率阈值={}% 慢调用={}ms/{}% 窗口={} 最小调用={} 熔断={}s 半开探测={} 落库间隔={}s",
-                enabled, config.failureRateThreshold(), config.slowCallMs(), config.slowCallRateThreshold(),
+        CircuitBreakerConfig config = config();
+        log.info("熔断器参数(默认值,可被 system_config 覆盖): enabled={} 失败率阈值={}% 慢调用={}ms/{}% 窗口={} 最小调用={} 熔断={}s 半开探测={} 落库间隔={}s 状态存储=Redis(多实例共享)",
+                enabled(), config.failureRateThreshold(), config.slowCallMs(), config.slowCallRateThreshold(),
                 config.slidingWindowSize(), config.minimumCalls(), config.openSeconds(),
                 config.halfOpenCalls(), persistIntervalSeconds);
     }
 
-    // ── 对外 API ───────────────────────────────────────────────────────────
+    // ── 对外 API（与原实现签名一致） ──────────────────────────────────────
 
     /**
      * 是否放行一次请求。
      *
-     * <p>副作用：{@code OPEN} 且冷却期已结束时，本次调用会把状态推进到 {@code HALF_OPEN}
-     * 并占用一个探测名额。
+     * <p>副作用：{@code OPEN} 且冷却期已结束时推进到 {@code HALF_OPEN} 并占一个探测名额
+     * （Redis Lua 内原子完成）。
      */
     public boolean allowRequest(String platformCode, String featureCode, String providerKey) {
-        if (!enabled) {
+        if (!enabled()) {
             return true;
         }
-        return breaker(platformCode, featureCode, providerKey).tryAcquire();
+        String supplierKey = supplierKey(platformCode, featureCode, providerKey);
+        try {
+            CircuitRedisState.AcquireResult result = redisState.tryAcquire(
+                    supplierKey, System.currentTimeMillis(), config().openSeconds(),
+                    config().halfOpenCalls(), seedCandidate(supplierKey));
+            publishIfTransitioned(supplierKey, result.prevState(), result.newState(), "冷却期结束");
+            return result.allowed();
+        } catch (Exception e) {
+            // Redis 抖动：放行兜底（宁可多打一次，不能因健康检查自身故障掐断全部采集）
+            log.warn("熔断放行判定失败，按放行兜底: key={} error={}", supplierKey, e.getMessage());
+            return true;
+        }
     }
 
     /** 记录一次成功调用。 */
     public void recordSuccess(String platformCode, String featureCode, String providerKey, long latencyMs) {
-        if (!enabled) {
-            return;
-        }
-        breaker(platformCode, featureCode, providerKey).onSuccess(latencyMs);
+        record(platformCode, featureCode, providerKey, latencyMs, false);
     }
 
     /** 记录一次失败调用。 */
     public void recordFailure(String platformCode, String featureCode, String providerKey, long latencyMs) {
-        if (!enabled) {
-            return;
-        }
-        breaker(platformCode, featureCode, providerKey).onFailure(latencyMs);
+        record(platformCode, featureCode, providerKey, latencyMs, true);
     }
 
-    /** 查询当前熔断状态（不产生副作用，不推进状态机）。 */
+    /** 查询当前熔断状态（无副作用）。 */
     public CircuitState stateOf(String platformCode, String featureCode, String providerKey) {
-        if (!enabled) {
+        if (!enabled()) {
             return CircuitState.CLOSED;
         }
-        return breaker(platformCode, featureCode, providerKey).state();
+        try {
+            return redisState.stateOf(supplierKey(platformCode, featureCode, providerKey));
+        } catch (Exception e) {
+            return CircuitState.CLOSED;
+        }
     }
 
     /** 全部已知供应商的熔断状态快照（供运维接口/指标使用）。 */
     public Map<String, CircuitState> snapshot() {
         Map<String, CircuitState> result = new LinkedHashMap<>();
-        breakers.forEach((key, b) -> result.put(key, b.state()));
+        for (String key : redisState.knownSupplierKeys()) {
+            try {
+                result.put(key, redisState.stateOf(key));
+            } catch (Exception ignored) {
+                // Redis 抖动时跳过该 key，不拖垮整个快照
+            }
+        }
         return Collections.unmodifiableMap(result);
     }
 
     /** 已知的供应商 key 数量（供自检）。 */
     public int trackedCount() {
-        return breakers.size();
+        return redisState.knownSupplierKeys().size();
     }
 
     /**
-     * 人工强制恢复：把熔断状态复位到 CLOSED 并清空滑动窗口。
-     *
-     * <p>用于运维在确认上游已修复后立即恢复流量，不必等冷却期 + 探测。
-     * 自动恢复路径（OPEN → HALF_OPEN → CLOSED）才是常态，本方法是兜底手段。
+     * 人工强制恢复：把熔断状态复位到 CLOSED 并清空滑动窗口（Redis 原子）。
      */
     public void reset(String platformCode, String featureCode, String providerKey) {
-        breaker(platformCode, featureCode, providerKey).resetToClosed();
+        String supplierKey = supplierKey(platformCode, featureCode, providerKey);
+        redisState.reset(supplierKey);
+        log.info("熔断器人工复位: key={}", supplierKey);
+        persistThrottled(supplierKey, CircuitState.CLOSED, true);
     }
 
-    // ── Breaker 装载 ───────────────────────────────────────────────────────
+    // ── 内部 ───────────────────────────────────────────────────────────────
 
-    private Breaker breaker(String platformCode, String featureCode, String providerKey) {
-        String supplierKey = PlatformFeatureConfig.buildStateKey(platformCode, featureCode, providerKey);
-        Breaker b = breakers.get(supplierKey);
-        if (b != null) {
-            return b;
+    private void record(String platformCode, String featureCode, String providerKey,
+                        long latencyMs, boolean failed) {
+        if (!enabled()) {
+            return;
         }
-        Breaker created = load(supplierKey, platformCode, featureCode, providerKey);
-        Breaker prev = breakers.putIfAbsent(supplierKey, created);
-        return prev != null ? prev : created;
-    }
-
-    /**
-     * 构造 Breaker，并从 {@code supplier_state} 恢复历史状态。
-     *
-     * <p>恢复的意义：进程重启后若供应商此前处于 {@code OPEN}，不应立刻重新打它；
-     * 冷却期已过则由下一次 {@link #allowRequest} 自然转入半开探测。
-     */
-    private Breaker load(String supplierKey, String platformCode, String featureCode, String providerKey) {
-        Breaker b = new Breaker(supplierKey, platformCode, featureCode, providerKey);
+        String supplierKey = supplierKey(platformCode, featureCode, providerKey);
         try {
-            supplierStateDao.findBySupplierKey(supplierKey).ifPresent(state -> {
-                b.docId = state.getId();
-                b.totalSuccess = state.getTotalSuccess() == null ? 0L : state.getTotalSuccess();
-                b.totalFailure = state.getTotalFailure() == null ? 0L : state.getTotalFailure();
-                b.consecutiveFailures = state.getConsecutiveFailures() == null ? 0 : state.getConsecutiveFailures();
-                b.lastSuccessTime = state.getLastSuccessTime();
-                b.lastFailureTime = state.getLastFailureTime();
-                if (state.getAvgResponseTime() != null) {
-                    b.avgResponseTime = state.getAvgResponseTime();
-                }
-                b.state = parseState(state.getCircuitState());
-                if (state.getCircuitOpenedAt() != null) {
-                    b.openedAtMillis = state.getCircuitOpenedAt().toEpochMilli();
-                }
-                if (b.state == CircuitState.OPEN && b.openedAtMillis <= 0) {
-                    // 脏数据兜底：OPEN 但没有开路时间，视为刚熔断，避免立即放行
-                    b.openedAtMillis = System.currentTimeMillis();
-                }
-                if (b.state != CircuitState.CLOSED) {
-                    log.warn("从 DB 恢复熔断状态: key={} state={} openedAt={}", supplierKey, b.state, state.getCircuitOpenedAt());
-                }
-            });
+            boolean slow = config().slowCallMs() > 0 && latencyMs >= config().slowCallMs();
+            CircuitRedisState.OutcomeResult result = redisState.recordOutcome(
+                    supplierKey, System.currentTimeMillis(), failed, slow, config());
+            Totals totals = localTotals.computeIfAbsent(supplierKey, k -> new Totals());
+            totals.record(failed, latencyMs);
+            if (result.changed()) {
+                publishTransition(supplierKey, result.from(), result.to(), result.reason());
+                persistThrottled(supplierKey, parseState(result.to()), true);
+            } else {
+                persistThrottled(supplierKey, parseState(result.to()), false);
+            }
         } catch (Exception e) {
-            log.warn("读取供应商历史状态失败（按 CLOSED 起步）: key={} error={}", supplierKey, e.getMessage());
+            // 上报失败不能影响采集主流程；Redis 状态以其它调用点的上报为准
+            log.warn("熔断结果上报失败(非关键): key={} error={}", supplierKey, e.getMessage());
         }
-        return b;
+    }
+
+    private void publishIfTransitioned(String supplierKey, String from, String to, String reason) {
+        if (from != null && !from.equals(to)) {
+            publishTransition(supplierKey, from, to, reason);
+        }
+    }
+
+    private void publishTransition(String supplierKey, String from, String to, String reason) {
+        CircuitState fromState = parseState(from);
+        CircuitState toState = parseState(to);
+        if (fromState == toState) {
+            return;
+        }
+        if (toState == CircuitState.OPEN) {
+            log.error("熔断器 OPEN: key={} ← {} 原因={} 冷却={}s", supplierKey, fromState, reason, config().openSeconds());
+        } else if (toState == CircuitState.HALF_OPEN) {
+            log.warn("熔断器 HALF_OPEN: key={} ← {} 原因={}", supplierKey, fromState, reason);
+        } else {
+            log.info("熔断器 CLOSED: key={} ← {} 原因={}", supplierKey, fromState, reason);
+        }
+        try {
+            eventPublisher.publishEvent(new CircuitStateChangedEvent(
+                    supplierKey, fromState, toState, reason, Instant.now()));
+        } catch (Exception e) {
+            log.warn("发布熔断状态事件失败(非关键): key={} error={}", supplierKey, e.getMessage());
+        }
+    }
+
+    /** Mongo 观测副本写穿：状态迁移立即落库，纯计数按 interval 节流。 */
+    private void persistThrottled(String supplierKey, CircuitState state, boolean force) {
+        long now = System.currentTimeMillis();
+        Long last = lastPersistAt.get(supplierKey);
+        if (!force && last != null && now - last < persistIntervalMs()) {
+            return;
+        }
+        lastPersistAt.put(supplierKey, now);
+        try {
+            Totals totals = localTotals.get(supplierKey);
+            SupplierState doc = new SupplierState();
+            int idx = supplierKey.indexOf(':');
+            int idx2 = idx > 0 ? supplierKey.indexOf(':', idx + 1) : -1;
+            doc.setSupplierKey(supplierKey);
+            doc.setPlatformCode(idx > 0 ? supplierKey.substring(0, idx) : null);
+            doc.setFeatureCode(idx > 0 && idx2 > 0 ? supplierKey.substring(idx + 1, idx2) : null);
+            doc.setCircuitState(state.name());
+            doc.setCircuitOpenedAt(state == CircuitState.CLOSED ? null : Instant.now());
+            doc.setHealthStatus(switch (state) {
+                case CLOSED -> "UP";
+                case HALF_OPEN -> "DEGRADED";
+                case OPEN -> "DOWN";
+            });
+            if (totals != null) {
+                doc.setConsecutiveFailures(totals.consecutiveFailures);
+                doc.setTotalSuccess(totals.success.get());
+                doc.setTotalFailure(totals.failure.get());
+                doc.setLastSuccessTime(totals.lastSuccessTime);
+                doc.setLastFailureTime(totals.lastFailureTime);
+                doc.setAvgResponseTime(totals.avgResponseTime);
+            }
+            doc.setLastHeartbeat(Instant.now());
+            doc.setUpdateTime(Instant.now());
+            supplierStateDao.save(doc);
+        } catch (Exception e) {
+            log.warn("熔断状态落库失败(非关键): key={} error={}", supplierKey, e.getMessage());
+        }
+    }
+
+    /** Mongo 历史状态（首次触碰播种用；本实例已触碰过的直接传 null 免去无谓读库）。 */
+    private SupplierState seedCandidate(String supplierKey) {
+        if (localTotals.containsKey(supplierKey) || lastPersistAt.containsKey(supplierKey)) {
+            return null; // 已触碰过：Redis 状态必然已建立
+        }
+        try {
+            return supplierStateDao.findBySupplierKey(supplierKey).orElse(null);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static String supplierKey(String platformCode, String featureCode, String providerKey) {
+        return PlatformFeatureConfig.buildStateKey(platformCode, featureCode, providerKey);
     }
 
     private static CircuitState parseState(String raw) {
@@ -226,257 +297,59 @@ public class ProviderCircuitBreaker {
         }
     }
 
-    // ── 单个供应商的熔断状态机 ─────────────────────────────────────────────
+    // ── 动态配置读取 ───────────────────────────────────────────────────────
 
-    /** 一次调用的观测结果。 */
-    private record Call(boolean failed, boolean slow) {
+    private boolean enabled() {
+        return systemConfigService.getBool("collector.circuit.enabled", enabledDefault);
     }
 
-    private final class Breaker {
+    private long persistIntervalMs() {
+        return systemConfigService.getLong("collector.circuit.persist-interval-seconds",
+                persistIntervalSeconds) * 1000L;
+    }
 
-        private final String supplierKey;
-        private final String platformCode;
-        private final String featureCode;
-        private final String providerKey;
-        private final Object lock = new Object();
+    /**
+     * 当前生效的熔断参数（每次评估现读；配置来自 60s 缓存，开销是一次内存 Map 查找）。
+     */
+    private CircuitBreakerConfig config() {
+        return new CircuitBreakerConfig(
+                systemConfigService.getDouble("collector.circuit.failure-rate-threshold", failureRateThreshold),
+                systemConfigService.getLong("collector.circuit.slow-call-ms", slowCallMs),
+                systemConfigService.getDouble("collector.circuit.slow-call-rate-threshold", slowCallRateThreshold),
+                (int) systemConfigService.getLong("collector.circuit.sliding-window-size", slidingWindowSize),
+                (int) systemConfigService.getLong("collector.circuit.minimum-calls", minimumCalls),
+                systemConfigService.getLong("collector.circuit.open-seconds", openSeconds),
+                (int) systemConfigService.getLong("collector.circuit.half-open-calls", halfOpenCalls)
+        ).sanitized();
+    }
 
-        /** 最近 {@code slidingWindowSize} 次调用。 */
-        private final ArrayDeque<Call> window = new ArrayDeque<>();
+    /** 本实例本地累计（观测聚合，不参与判定）。 */
+    private static final class Totals {
+        private final AtomicLong success = new AtomicLong();
+        private final AtomicLong failure = new AtomicLong();
+        private volatile int consecutiveFailures;
+        private volatile Instant lastSuccessTime;
+        private volatile Instant lastFailureTime;
+        private volatile double avgResponseTime;
+        private final AtomicLong successSamples = new AtomicLong();
 
-        private CircuitState state = CircuitState.CLOSED;
-        private long openedAtMillis;
-        private long halfOpenStartedAtMillis;
-        private int halfOpenPermits;
-        private int halfOpenSuccesses;
-
-        private long totalSuccess;
-        private long totalFailure;
-        private int consecutiveFailures;
-        private Instant lastSuccessTime;
-        private Instant lastFailureTime;
-        private double avgResponseTime;
-
-        /** DB 文档 _id（从 DB 恢复时保留，避免 save 插入重复文档）。 */
-        private String docId;
-        private long lastPersistAt;
-
-        private Breaker(String supplierKey, String platformCode, String featureCode, String providerKey) {
-            this.supplierKey = supplierKey;
-            this.platformCode = platformCode;
-            this.featureCode = featureCode;
-            this.providerKey = providerKey;
-        }
-
-        private CircuitState state() {
-            return state;
-        }
-
-        private boolean tryAcquire() {
-            synchronized (lock) {
-                long now = System.currentTimeMillis();
-                if (state == CircuitState.OPEN) {
-                    if (now - openedAtMillis < config.openSeconds() * 1000L) {
-                        return false;
-                    }
-                    enterHalfOpenLocked("冷却期结束，放行 " + config.halfOpenCalls() + " 个探测");
-                    persistLocked(true);
-                }
-                if (state == CircuitState.HALF_OPEN) {
-                    // 探测名额已被领走但迟迟没有结果（例如候选排在后面、最终没被真正执行）：
-                    // 若不回收，permits 会一直是 0，熔断器就永久卡在 HALF_OPEN 拒绝一切请求。
-                    if (halfOpenPermits <= 0
-                            && now - halfOpenStartedAtMillis >= config.openSeconds() * 1000L) {
-                        log.warn("半开探测超时未回收，重新发放探测名额: key={} 已过半开 {}ms",
-                                supplierKey, now - halfOpenStartedAtMillis);
-                        enterHalfOpenLocked("半开探测超时未回收，重新发放探测名额");
-                        persistLocked(true);
-                    }
-                    if (halfOpenPermits <= 0) {
-                        return false;
-                    }
-                    halfOpenPermits--;
-                    return true;
-                }
-                return true;
-            }
-        }
-
-        private void onSuccess(long latencyMs) {
-            synchronized (lock) {
-                totalSuccess++;
-                consecutiveFailures = 0;
-                lastSuccessTime = Instant.now();
-                if (latencyMs > 0) {
-                    // 增量均值，避免为算平均响应时间而保留全部样本
-                    avgResponseTime = avgResponseTime <= 0
-                            ? latencyMs
-                            : avgResponseTime + (latencyMs - avgResponseTime) / Math.min(totalSuccess, 1000);
-                }
-
-                boolean changed = false;
-                if (state == CircuitState.HALF_OPEN) {
-                    halfOpenSuccesses++;
-                    log.info("熔断半开探测成功: key={} {}/{}", supplierKey, halfOpenSuccesses, config.halfOpenCalls());
-                    if (halfOpenSuccesses >= config.halfOpenCalls()) {
-                        window.clear();
-                        halfOpenPermits = 0;
-                        changed = transitionLocked(CircuitState.CLOSED, "半开探测全部成功");
-                    }
-                } else if (state == CircuitState.CLOSED) {
-                    pushLocked(new Call(false, config.slowCallMs() > 0 && latencyMs >= config.slowCallMs()));
-                    // 成功路径也必须评估：慢调用往往仍是"成功"，只在失败路径评估会让慢调用阈值永不生效
-                    changed = evaluateLocked();
-                }
-                // OPEN 期间迟到的成功（请求在熔断前发出）：只记账，不改变状态。
-                // 三个分支都要走到这里：否则 OPEN 期间的计数只留在内存，DB 会长期漂移。
-                persistLocked(changed);
-            }
-        }
-
-        private void onFailure(long latencyMs) {
-            synchronized (lock) {
-                totalFailure++;
+        void record(boolean failed, long latencyMs) {
+            Instant now = Instant.now();
+            if (failed) {
+                failure.incrementAndGet();
                 consecutiveFailures++;
-                lastFailureTime = Instant.now();
-
-                boolean changed = false;
-                if (state == CircuitState.HALF_OPEN) {
-                    halfOpenPermits = 0;
-                    changed = transitionLocked(CircuitState.OPEN, "半开探测失败");
-                } else if (state == CircuitState.CLOSED) {
-                    pushLocked(new Call(true, config.slowCallMs() > 0 && latencyMs >= config.slowCallMs()));
-                    changed = evaluateLocked();
-                }
-                persistLocked(changed);
-            }
-        }
-
-        private void pushLocked(Call call) {
-            window.addLast(call);
-            while (window.size() > config.slidingWindowSize()) {
-                window.removeFirst();
-            }
-        }
-
-        /** 按滑动窗口评估是否熔断。@return 是否发生了状态迁移 */
-        private boolean evaluateLocked() {
-            if (window.size() < config.minimumCalls()) {
-                return false;
-            }
-            int total = window.size();
-            int failed = 0;
-            int slow = 0;
-            for (Call c : window) {
-                if (c.failed()) failed++;
-                if (c.slow()) slow++;
-            }
-            double failureRate = failed * 100.0 / total;
-            if (failureRate >= config.failureRateThreshold()) {
-                openLocked(String.format("失败率 %.1f%% (%d/%d) 达阈值 %.1f%%",
-                        failureRate, failed, total, config.failureRateThreshold()));
-                return true;
-            }
-            if (config.slowCallMs() > 0) {
-                double slowRate = slow * 100.0 / total;
-                if (slowRate >= config.slowCallRateThreshold()) {
-                    openLocked(String.format("慢调用比例 %.1f%% (%d/%d，慢调用≥%dms) 达阈值 %.1f%%",
-                            slowRate, slow, total, config.slowCallMs(), config.slowCallRateThreshold()));
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        private void openLocked(String reason) {
-            openedAtMillis = System.currentTimeMillis();
-            halfOpenPermits = 0;
-            transitionLocked(CircuitState.OPEN, reason);
-        }
-
-        /** 人工复位：清窗口、清探测状态、回 CLOSED。 */
-        private void resetToClosed() {
-            synchronized (lock) {
-                window.clear();
-                halfOpenPermits = 0;
-                halfOpenSuccesses = 0;
-                consecutiveFailures = 0;
-                transitionLocked(CircuitState.CLOSED, "人工复位");
-                persistLocked(true);
-            }
-        }
-
-        private void enterHalfOpenLocked(String reason) {
-            halfOpenStartedAtMillis = System.currentTimeMillis();
-            halfOpenPermits = config.halfOpenCalls();
-            halfOpenSuccesses = 0;
-            transitionLocked(CircuitState.HALF_OPEN, reason);
-        }
-
-        /** 状态迁移（幂等：目标状态与当前相同时什么都不做）。@return 是否真的发生了迁移 */
-        private boolean transitionLocked(CircuitState to, String reason) {
-            if (state == to) {
-                return false;
-            }
-            CircuitState from = state;
-            state = to;
-            if (to == CircuitState.OPEN) {
-                log.error("熔断器 OPEN: key={} ← {} 原因={} 冷却={}s", supplierKey, from, reason, config.openSeconds());
-            } else if (to == CircuitState.HALF_OPEN) {
-                log.warn("熔断器 HALF_OPEN: key={} ← {} 原因={}", supplierKey, from, reason);
+                lastFailureTime = now;
             } else {
-                log.info("熔断器 CLOSED: key={} ← {} 原因={}", supplierKey, from, reason);
+                success.incrementAndGet();
+                consecutiveFailures = 0;
+                lastSuccessTime = now;
             }
-            try {
-                eventPublisher.publishEvent(new CircuitStateChangedEvent(supplierKey, from, to, reason, Instant.now()));
-            } catch (Exception e) {
-                log.warn("发布熔断状态事件失败(非关键): key={} error={}", supplierKey, e.getMessage());
+            if (latencyMs > 0) {
+                long samples = successSamples.incrementAndGet();
+                avgResponseTime = avgResponseTime <= 0
+                        ? latencyMs
+                        : avgResponseTime + (latencyMs - avgResponseTime) / Math.min(samples, 1000);
             }
-            return true;
-        }
-
-        /** 写穿到 {@code supplier_state}。 */
-        private void persistLocked(boolean force) {
-            long now = System.currentTimeMillis();
-            if (!force && now - lastPersistAt < persistIntervalMs) {
-                return;
-            }
-            lastPersistAt = now;
-            try {
-                SupplierState doc = new SupplierState();
-                doc.setId(docId);
-                doc.setSupplierKey(supplierKey);
-                doc.setPlatformCode(platformCode);
-                doc.setFeatureCode(featureCode);
-                doc.setProviderKey(providerKey);
-                doc.setCircuitState(state.name());
-                doc.setCircuitOpenedAt(state == CircuitState.CLOSED ? null : Instant.ofEpochMilli(
-                        state == CircuitState.OPEN ? openedAtMillis : now));
-                doc.setHealthStatus(healthStatusOf(state));
-                doc.setConsecutiveFailures(consecutiveFailures);
-                doc.setTotalSuccess(totalSuccess);
-                doc.setTotalFailure(totalFailure);
-                doc.setLastSuccessTime(lastSuccessTime);
-                doc.setLastFailureTime(lastFailureTime);
-                doc.setAvgResponseTime(avgResponseTime);
-                doc.setLastHeartbeat(Instant.now());
-                doc.setUpdateTime(Instant.now());
-                supplierStateDao.save(doc);
-                // save 之后文档可能被赋 _id（首次插入），回填以便后续按 _id 更新
-                if (docId == null) {
-                    docId = doc.getId();
-                }
-            } catch (Exception e) {
-                // 落库失败不能影响采集主流程；内存状态仍然正确
-                log.warn("熔断状态落库失败(非关键): key={} error={}", supplierKey, e.getMessage());
-            }
-        }
-
-        private String healthStatusOf(CircuitState s) {
-            return switch (s) {
-                case CLOSED -> "UP";
-                case HALF_OPEN -> "DEGRADED";
-                case OPEN -> "DOWN";
-            };
         }
     }
 }

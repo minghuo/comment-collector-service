@@ -97,7 +97,7 @@ public class PlatformFeatureConfigDao {
     /**
      * 更新指定功能下某供应商的限流速率。
      *
-     * <p>更新后调用方须淘汰配置缓存，并调用 {@code ProviderRateLimitManager#syncRate} 让令牌桶热更新。
+     * <p>更新后调用方须淘汰配置缓存，速率与延迟均为共享状态，下一次取令牌即按新速率执行（令牌桶在 Redis）。
      *
      * @return 命中的文档数（0 表示组合不存在）
      */

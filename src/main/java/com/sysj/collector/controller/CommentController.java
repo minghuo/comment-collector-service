@@ -2,6 +2,7 @@ package com.sysj.collector.controller;
 
 import com.sysj.collector.facade.CommentCollectionFacade;
 import com.sysj.collector.model.*;
+import com.sysj.collector.domain.service.LinkDispatchService;
 import com.sysj.collector.domain.service.TaskManagementService;
 import com.sysj.collector.domain.document.CommentDoc;
 import com.sysj.collector.domain.document.MasterTask;
@@ -34,6 +35,7 @@ public class CommentController {
 
     private final CommentCollectionFacade collectionFacade;
     private final TaskManagementService taskManagementService;
+    private final LinkDispatchService linkDispatchService;
     private final MasterTaskDao masterTaskDao;
     private final SubTaskDao subTaskDao;
     private final CommentDao commentDao;
@@ -61,18 +63,20 @@ public class CommentController {
         log.info("异步采集请求: userId={} platform={} links={}",
                 request.getUserId(), request.getPlatform(), links.size());
 
-        // 1. 创建主任务
-        MasterTask masterTask = taskManagementService.createMasterTask(
-                request.getUserId(),
-                request.getUserTierCode(),
-                request.getPlatform(),
-                request.getFunction(),
-                request.getLinks(),
-                "ASYNC",
-                request.getRequestParams(),
-                request.getSupplierConstraint(),
-                request.getCallbackUrl()
-        );
+        // 1. 创建主任务（idempotencyKey 非空时重复提交返回已有任务）
+        MasterTask masterTask = taskManagementService.createMasterTask(TaskCreateCommand.builder()
+                .userId(request.getUserId())
+                .userTierCode(request.getUserTierCode())
+                .platformCode(request.getPlatform())
+                .featureCode(request.getFunction())
+                .links(request.getLinks())
+                .mode("ASYNC")
+                .requestParams(request.getRequestParams())
+                .supplierConstraint(request.getSupplierConstraint())
+                .callbackUrl(request.getCallbackUrl())
+                .idempotencyKey(request.getIdempotencyKey())
+                .autoPage(request.getAutoPage())
+                .build());
 
         Map<String, Object> response = new HashMap<>();
         response.put("success", true);
@@ -94,17 +98,19 @@ public class CommentController {
         log.info("创建任务请求: userId={} platform={} links={}",
                 request.getUserId(), request.getPlatform(), links.size());
 
-        MasterTask masterTask = taskManagementService.createMasterTask(
-                request.getUserId(),
-                request.getUserTierCode(),
-                request.getPlatform(),
-                request.getFunction(),
-                links,
-                "ASYNC",
-                request.getRequestParams(),
-                request.getSupplierConstraint(),
-                request.getCallbackUrl()
-        );
+        MasterTask masterTask = taskManagementService.createMasterTask(TaskCreateCommand.builder()
+                .userId(request.getUserId())
+                .userTierCode(request.getUserTierCode())
+                .platformCode(request.getPlatform())
+                .featureCode(request.getFunction())
+                .links(links)
+                .mode("ASYNC")
+                .requestParams(request.getRequestParams())
+                .supplierConstraint(request.getSupplierConstraint())
+                .callbackUrl(request.getCallbackUrl())
+                .idempotencyKey(request.getIdempotencyKey())
+                .autoPage(request.getAutoPage())
+                .build());
 
         Map<String, Object> response = new HashMap<>();
         response.put("success", true);
@@ -112,6 +118,74 @@ public class CommentController {
         response.put("totalLinks", masterTask.getTotalLinks());
 
         return ResponseEntity.ok(response);
+    }
+
+    // ── 混合平台链接自动分派 ───────────────────────────────────────────────
+
+    /**
+     * 混合平台链接自动分派：按链接特征识别平台，拆分为各平台主任务。
+     *
+     * <p>微博等双供应商平台按 cookie 有无路由（有 → 本地采集，无 → Golaxy 渠道）；
+     * 未接入平台的链接归入 unsupportedUrls；功能未开启/队列已满的分组归入 skipped 并注明原因。
+     * 同批各平台主任务共享 dispatchId，可用 {@link #dispatchBatchStatus(String)} 聚合查询进度。
+     */
+    @PostMapping("/collect/dispatch")
+    @Operation(summary = "混合平台链接自动分派",
+            description = "提交混合平台链接，自动识别平台并拆分为各平台异步任务；返回批次ID与各平台子任务")
+    public ResponseEntity<LinkDispatchResult> dispatchLinks(@RequestBody LinkDispatchRequest request) {
+        log.info("混合平台自动分派请求: userId={} links={}",
+                request == null ? null : request.getUserId(),
+                request == null || request.getLinks() == null ? 0 : request.getLinks().size());
+        LinkDispatchResult result = linkDispatchService.dispatch(request);
+        return ResponseEntity.ok(result);
+    }
+
+    /**
+     * 分派批次进度聚合：返回同批拆分的各平台主任务状态。
+     */
+    @GetMapping("/dispatch/{dispatchId}")
+    @Operation(summary = "查询分派批次进度", description = "按批次ID聚合同批各平台主任务的状态与计数")
+    public ResponseEntity<Map<String, Object>> dispatchBatchStatus(@PathVariable String dispatchId) {
+        List<MasterTask> tasks = linkDispatchService.findBatchTasks(dispatchId);
+        if (tasks.isEmpty()) {
+            return ResponseEntity.notFound().build();
+        }
+
+        List<Map<String, Object>> taskList = new ArrayList<>();
+        int totalLinks = 0;
+        int successLinks = 0;
+        int failedLinks = 0;
+        boolean allFinished = true;
+        for (MasterTask task : tasks) {
+            Map<String, Object> item = new HashMap<>();
+            item.put("taskId", task.getId());
+            item.put("platformCode", task.getPlatformCode());
+            item.put("featureCode", task.getFeatureCode());
+            item.put("status", task.getStatus());
+            item.put("totalLinks", task.getTotalLinks());
+            item.put("successLinks", task.getSuccessLinks());
+            item.put("failedLinks", task.getFailedLinks());
+            item.put("createTime", task.getCreateTime());
+            item.put("updateTime", task.getUpdateTime());
+            taskList.add(item);
+
+            totalLinks += task.getTotalLinks();
+            successLinks += task.getSuccessLinks();
+            failedLinks += task.getFailedLinks();
+            if (!"COMPLETED".equals(task.getStatus()) && !"FAILED".equals(task.getStatus())) {
+                allFinished = false;
+            }
+        }
+
+        Map<String, Object> body = new HashMap<>();
+        body.put("success", true);
+        body.put("dispatchId", dispatchId);
+        body.put("batchFinished", allFinished);
+        body.put("totalLinks", totalLinks);
+        body.put("successLinks", successLinks);
+        body.put("failedLinks", failedLinks);
+        body.put("tasks", taskList);
+        return ResponseEntity.ok(body);
     }
 
     // ── 任务查询 ───────────────────────────────────────────────────────────

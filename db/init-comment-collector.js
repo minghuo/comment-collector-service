@@ -118,6 +118,60 @@ const FEATURE_CONFIGS = [
       { provider_key: 'toutiao_local', name: '今日头条-本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','PROXY','SYNC_SUPPORTED'] },
     ],
   },
+  {
+    platform_code: 'tieba',
+    feature_code: 'comment',
+    feature_name: '百度贴吧评论采集',
+    providers: [
+      // 贴吧官方接口，无登录 cookie 可用；主列表 15 楼/页，楼中楼 30 条/页
+      { provider_key: 'tieba_local', name: '百度贴吧-本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
+    ],
+  },
+  {
+    platform_code: 'honor_bbs',
+    feature_code: 'comment',
+    feature_name: '荣耀社区评论采集',
+    providers: [
+      // Discuz 页面直出 HTML + XPath 解析；回复全部内嵌页面，无子回复接口（不声明 SUB_COMMENT）
+      { provider_key: 'honor_bbs_local', name: '荣耀社区-本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
+    ],
+  },
+  {
+    platform_code: 'huawei_bbs',
+    feature_code: 'comment',
+    feature_name: '华为社区评论采集',
+    providers: [
+      // vmall 俱乐部 SGW 网关接口（SGW-APP-ID 内置于实现）；页码分页
+      { provider_key: 'huawei_bbs_local', name: '华为社区-本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
+    ],
+  },
+  {
+    platform_code: 'oppo_bbs',
+    feature_code: 'comment',
+    feature_name: 'OPPO社区评论采集',
+    providers: [
+      // www.oppo.cn 官方 UGC 接口（GET JSON，无需签名）；页码分页
+      { provider_key: 'oppo_bbs_local', name: 'OPPO社区-本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
+    ],
+  },
+  {
+    platform_code: 'vivo_bbs',
+    feature_code: 'comment',
+    feature_name: 'vivo社区评论采集',
+    providers: [
+      // bbs.vivo.com.cn 官方接口（nonce 签名内置于实现）；lastId 键集翻页
+      { provider_key: 'vivo_bbs_local', name: 'vivo社区-本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
+    ],
+  },
+  {
+    platform_code: 'xiaomi_bbs',
+    feature_code: 'comment',
+    feature_name: '小米社区评论采集',
+    providers: [
+      // api.vip.miui.com 官方接口（GET，无需签名）；after 游标（主列表=偏移量，回复=末条回复 id）
+      { provider_key: 'xiaomi_bbs_local', name: '小米社区-本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
+    ],
+  },
 ];
 
 /** 用户等级：priority 越小越优先；activationThreshold 见 user_tier_config 注释 */
@@ -334,13 +388,39 @@ await db.supplier_state.createIndex({ supplier_key: 1 }, { unique: true, name: '
 
 await db.master_task.createIndex({ status: 1, create_time: 1 }, { name: 'idx_status_create_time' });
 await db.master_task.createIndex({ user_id: 1, create_time: -1 }, { name: 'idx_user_create_time' });
+// 提交幂等键唯一索引（阶段1 幂等改造）：partial 过滤表达式只约束 string 类型的键，
+// 未传幂等键的任务（无该字段 / null）不受唯一性约束。
+// 前置条件：TaskManagementService 已支持并发同 key 时捕获 DuplicateKeyException 并回查返回。
+try {
+  await db.master_task.dropIndex('idx_idempotency_key');
+} catch (e) { /* 首次执行不存在，正常 */ }
+await db.master_task.createIndex(
+  { idempotency_key: 1 },
+  { unique: true, name: 'idx_idempotency_key', partialFilterExpression: { idempotency_key: { $type: 'string' } } }
+);
 
 await db.sub_task.createIndex({ master_task_id: 1, status: 1 }, { name: 'idx_master_status' });
 await db.sub_task.createIndex({ status: 1, create_time: 1 }, { name: 'idx_status_create_time' });
-// 幂等键的"候选"索引：先建非唯一索引。
-// 一旦改成 unique，TaskManagementService.splitIntoSubTasks 必须捕获 DuplicateKeyException，
-// 否则同一主任务提交重复 link 时创建任务会直接报错（详见设计文档 §17 P3-3）。
-await db.sub_task.createIndex({ master_task_id: 1, link: 1 }, { name: 'idx_master_link' });
+// (master_task_id, link) 唯一索引（阶段1 幂等改造）：同一主任务下链接只允许一个子任务。
+// 建任务入口已先去重（TaskManagementService.doCreateMasterTask 用 LinkedHashSet 去重后再拆分），
+// 因此正常路径不会触发唯一冲突，索引是并发/数据修复场景的兜底。
+// 存量库若已有重复数据需先去重，否则建索引失败：
+//   db.sub_task.aggregate([{$group:{_id:{m:'$master_task_id',l:'$link'},n:{$sum:1},ids:{$push:'$_id'}}},{$match:{n:{$gt:1}}}])
+//   —— 每组保留 createTime 最早的一条，其余删除后再执行本脚本。
+try {
+  await db.sub_task.dropIndex('idx_master_link');
+  await db.sub_task.dropIndex('idx_master_link_unique');
+} catch (e) { /* 首次执行不存在，正常 */ }
+await db.sub_task.createIndex(
+  { master_task_id: 1, link: 1 },
+  { unique: true, name: 'idx_master_link_unique' }
+);
+// 子任务重投扫描的部分索引（阶段1 重试闭环）：只索引 RETRYING 文档，
+// SubTaskDao.findDueRetries 的扫描开销与待重投规模成正比
+await db.sub_task.createIndex(
+  { next_execute_time: 1 },
+  { name: 'idx_retry_scan', partialFilterExpression: { status: 'RETRYING' } }
+);
 
 // —— 采集结果集合 comment（单集合 + data_type 判别）——
 // 分页查询的排序键是 insert_time，因此把 insert_time 放进复合索引，
@@ -358,6 +438,61 @@ try {
 } catch (e) {
   // 首次执行时该索引不存在，属正常
 }
+
+// —— 系统运行参数配置 system_config（_id 即配置键）——
+// DB 值覆盖 application.properties 的同名默认，Caffeine 缓存 60s；
+// 用 $setOnInsert 播种：只在键不存在时写入，人工改过的值不会被本脚本重置。
+// 删除某个键 = 回退 properties 默认（或调 DELETE /api/config/{key}）。
+const SYSTEM_CONFIG_SEEDS = [
+  // 熔断器
+  { _id: 'collector.circuit.enabled', value: 'true', description: '熔断器总开关' },
+  { _id: 'collector.circuit.failure-rate-threshold', value: '50', description: '失败率熔断阈值（%）' },
+  { _id: 'collector.circuit.slow-call-ms', value: '10000', description: '慢调用判定线（毫秒），<=0 关闭' },
+  { _id: 'collector.circuit.slow-call-rate-threshold', value: '80', description: '慢调用比例熔断阈值（%）' },
+  { _id: 'collector.circuit.sliding-window-size', value: '20', description: '滑动窗口样本数' },
+  { _id: 'collector.circuit.minimum-calls', value: '5', description: '触发评估的最小调用数' },
+  { _id: 'collector.circuit.open-seconds', value: '60', description: '熔断冷却时长（秒），结束后进入半开' },
+  { _id: 'collector.circuit.half-open-calls', value: '3', description: '半开探测名额（全成功才恢复）' },
+  // 自适应限速
+  { _id: 'collector.ratelimit.adaptive-enabled', value: 'true', description: '自适应限速总开关' },
+  { _id: 'collector.ratelimit.reject-timeout-ms', value: '500', description: 'REJECT/WARM_UP 取令牌最长等待（毫秒）' },
+  { _id: 'collector.ratelimit.max-queue-wait-ms', value: '2000', description: 'THROTTLE_QUEUE 默认最长排队（毫秒）' },
+  { _id: 'collector.ratelimit.warm-up-seconds', value: '30', description: '冷启动/熔断恢复后的预热时长（秒）' },
+  { _id: 'collector.ratelimit.persist-interval-seconds', value: '30', description: '派生指标写库节流（秒）' },
+  // 调用管线
+  { _id: 'collector.pipeline.enabled', value: 'true', description: '管线总开关（false 直连供应商，压测隔离用）' },
+  { _id: 'collector.pipeline.timeout-ms', value: '15000', description: '全局单次调用超时（毫秒），供应商 timeout_ms 优先' },
+  { _id: 'collector.pipeline.default-max-concurrency', value: '4', description: '全局默认并发上限（Bulkhead），0=不限' },
+  { _id: 'collector.pipeline.retry-backoff-base-ms', value: '500', description: '供应商内重试退避基数（毫秒）' },
+  // 子任务级重投
+  { _id: 'collector.task.sub-retry-max', value: '2', description: '子任务重投次数上限（跨队列级）' },
+  { _id: 'collector.task.sub-retry-base-delay-ms', value: '2000', description: '重投退避基数（毫秒）' },
+  { _id: 'collector.task.sub-retry-max-delay-ms', value: '600000', description: '重投退避封顶（毫秒）' },
+  { _id: 'collector.task.sub-retry-queue-reschedule-ms', value: '30000', description: '重投被队列拒后的推迟时长（毫秒）' },
+  { _id: 'collector.task.sub-retry-scan-limit', value: '200', description: '重投扫描每轮最多处理条数' },
+  // 队列与调度（外置队列阶段2：容量在 XADD Lua 内按本值原子校验；公平配额由消费者逐轮读取）
+  { _id: 'collector.task.queue-capacity', value: '10000', description: '异步队列容量（HIGH+LOW 两流未确认消息总数上限）' },
+  { _id: 'collector.task.max-wait-minutes', value: '30', description: 'LOW 流等待超过该时长迁移到 HIGH（deadline 保障，分钟）' },
+  { _id: 'collector.task.fair-quota-ratio', value: '0.3', description: '公平配额：每轮留给低优先级流的比例' },
+  { _id: 'collector.task.fair-quota-threshold', value: '0.7', description: '公平配额：高优先级占比达到该值才启用' },
+  { _id: 'collector.task.fair-quota-high-priority-bound', value: '500', description: '有效优先级小于该值进 HIGH 流（同时决定入队层级）' },
+  { _id: 'collector.task.fair-quota-batch-size', value: '20', description: '公平配额：一个消费轮次的名额数' },
+  // 服务端自动翻页
+  { _id: 'collector.task.auto-paging.enabled', value: 'false', description: '自动翻页全局默认（任务级 autoPage 优先）' },
+  { _id: 'collector.task.auto-paging.max-pages', value: '10', description: '单链接最大翻页深度' },
+  // 完成回调
+  { _id: 'collector.callback.enabled', value: 'true', description: '主任务完成回调开关' },
+  { _id: 'collector.callback.timeout-ms', value: '5000', description: '回调单次超时（毫秒）' },
+  { _id: 'collector.callback.max-attempts', value: '3', description: '回调重试次数' }
+];
+for (const seed of SYSTEM_CONFIG_SEEDS) {
+  await db.system_config.updateOne(
+    { _id: seed._id },
+    { $setOnInsert: { value: seed.value, description: seed.description, update_time: new Date() } },
+    { upsert: true }
+  );
+}
+print('    system_config 已播种 ' + SYSTEM_CONFIG_SEEDS.length + ' 个运行参数（$setOnInsert，不覆盖人工修改）');
 
 print('[5/5] 索引创建完成');
 

@@ -27,7 +27,7 @@ public class AppConfig {
     @Bean
     public CacheManager cacheManager() {
         CaffeineCacheManager manager = new CaffeineCacheManager(
-                "featureConfig", "userTierConfig");
+                "featureConfig", "userTierConfig", "systemConfig");
         manager.setCaffeine(Caffeine.newBuilder()
                 .expireAfterWrite(60, TimeUnit.SECONDS)
                 .maximumSize(1000)

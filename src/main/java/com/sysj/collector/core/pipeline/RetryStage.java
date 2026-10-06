@@ -1,5 +1,6 @@
 package com.sysj.collector.core.pipeline;
 
+import com.sysj.collector.domain.service.SystemConfigService;
 import com.sysj.collector.exception.ProviderInvocationException;
 import com.sysj.collector.exception.ProviderTimeoutException;
 
@@ -31,13 +32,29 @@ import java.util.function.Supplier;
 @Component
 public class RetryStage implements ProviderInvocationStage {
 
-    /** 管线总开关（压测时逐项隔离用，见 §9.2）。 */
+    /** 管线总开关默认值（system_config 同名键可覆盖；压测逐项隔离用，见 §9.2）。 */
     @Value("${collector.pipeline.enabled:true}")
-    private boolean pipelineEnabled;
+    private boolean pipelineEnabledDefault;
 
-    /** 退避基数（毫秒）：第 n 次重试等待 {@code base × 2^(n-1)}。 */
+    /** 退避基数（毫秒）默认值（system_config 同名键可覆盖）：第 n 次重试等待 {@code base × 2^(n-1)}。 */
     @Value("${collector.pipeline.retry-backoff-base-ms:500}")
-    private long backoffBaseMs;
+    private long backoffBaseMsDefault;
+
+    private final SystemConfigService systemConfigService;
+
+    public RetryStage(SystemConfigService systemConfigService) {
+        this.systemConfigService = systemConfigService;
+    }
+
+    // ── 动态配置读取（system_config 覆盖 properties 默认，60s 缓存） ────────
+
+    private boolean pipelineEnabled() {
+        return systemConfigService.getBool("collector.pipeline.enabled", pipelineEnabledDefault);
+    }
+
+    private long backoffBaseMs() {
+        return systemConfigService.getLong("collector.pipeline.retry-backoff-base-ms", backoffBaseMsDefault);
+    }
 
     @Override
     public int order() {
@@ -51,7 +68,7 @@ public class RetryStage implements ProviderInvocationStage {
 
     @Override
     public <T> T invoke(InvocationContext ctx, Supplier<T> next) {
-        if (!pipelineEnabled) {
+        if (!pipelineEnabled()) {
             return next.get();
         }
 
@@ -61,7 +78,7 @@ public class RetryStage implements ProviderInvocationStage {
 
         for (int attempt = 0; attempt <= ctx.maxRetry(); attempt++) {
             if (attempt > 0) {
-                long delay = backoffBaseMs * (1L << Math.min(attempt - 1, 20));
+                long delay = backoffBaseMs() * (1L << Math.min(attempt - 1, 20));
                 if (System.currentTimeMillis() + delay > deadline) {
                     throw ProviderTimeoutException.totalBudget(ctx.providerKey(), budget, attempt);
                 }

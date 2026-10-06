@@ -7,8 +7,10 @@ import org.springframework.data.domain.Sort;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.data.mongodb.core.query.Update;
 import org.springframework.stereotype.Component;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.stream.Stream;
@@ -92,6 +94,48 @@ public class SubTaskDao {
         Query query = new Query();
         query.addCriteria(Criteria.where("status").in(statuses));
         query.with(Sort.by(Sort.Direction.ASC, "createTime"));
+        return mongoTemplate.find(query, SubTask.class);
+    }
+
+    /**
+     * 条件终态写入：仅当子任务尚未处于终态时写 SUCCESS/FAILED，返回是否由本次写入。
+     *
+     * <p>外置队列是**至少一次**投递（崩溃后 XCLAIM 接管、deadline 迁移竞态都会重复投递），
+     * 该条件更新保证同一子任务的终态只被写一次 —— 调用方据此决定是否累加主任务计数，
+     * 重复投递不会造成计数翻倍。
+     *
+     * @return true = 本次写入生效（首次终态）；false = 已是终态（重复投递跳过）
+     */
+    public boolean markTerminalIfFirst(String subTaskId, String terminalStatus,
+                                       String providerKey, String resultJson, String errorMessage) {
+        Query query = new Query(Criteria.where("id").is(subTaskId)
+                .and("status").nin(List.of("SUCCESS", "FAILED")));
+        Update update = new Update()
+                .set("status", terminalStatus)
+                .set("errorMessage", errorMessage)
+                .set("completeTime", Instant.now())
+                .set("updateTime", Instant.now());
+        if (providerKey != null) {
+            update.set("providerKey", providerKey);
+        }
+        if (resultJson != null) {
+            update.set("result", resultJson);
+        }
+        return mongoTemplate.updateFirst(query, update, SubTask.class).getModifiedCount() == 1;
+    }
+
+    /**
+     * 查询重投到期的子任务（RETRYING 且 next_execute_time 已到，创建时间升序，限量）。
+     *
+     * <p>配套部分索引 {@code idx_retry_scan}（{@code db/init-comment-collector.js}），
+     * 只索引 RETRYING 状态的文档，扫描开销与待重投规模成正比。
+     */
+    public List<SubTask> findDueRetries(int limit) {
+        Query query = new Query();
+        query.addCriteria(Criteria.where("status").is("RETRYING")
+                .and("nextExecuteTime").lte(Instant.now()));
+        query.with(Sort.by(Sort.Direction.ASC, "nextExecuteTime"));
+        query.limit(Math.max(1, limit));
         return mongoTemplate.find(query, SubTask.class);
     }
 

@@ -1,14 +1,18 @@
 package com.sysj.collector.domain.dao;
 
 import com.sysj.collector.domain.document.MasterTask;
+import com.sysj.collector.domain.document.TaskStatuses;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Sort;
+import org.springframework.data.mongodb.core.FindAndModifyOptions;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.data.mongodb.core.query.Update;
 import org.springframework.stereotype.Component;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -76,5 +80,86 @@ public class MasterTaskDao {
      */
     public long countByStatus(String status) {
         return mongoTemplate.count(new Query(Criteria.where("status").is(status)), MasterTask.class);
+    }
+
+    /**
+     * 按自动分派批次 ID 查询同批拆分的全部主任务（创建时间升序）。
+     */
+    public List<MasterTask> findByDispatchId(String dispatchId) {
+        if (dispatchId == null || dispatchId.isBlank()) {
+            return List.of();
+        }
+        Query query = new Query();
+        query.addCriteria(Criteria.where("dispatchId").is(dispatchId));
+        query.with(Sort.by(Sort.Direction.ASC, "createTime"));
+        return mongoTemplate.find(query, MasterTask.class);
+    }
+
+    /**
+     * 按提交幂等键查询主任务。
+     *
+     * <p>配合唯一部分索引 {@code idx_idempotency_key}（见 {@code db/init-comment-collector.js}）：
+     * 同一幂等键并发提交时，后到的写入会因唯一索引失败，由调用方回查本方法返回已建成的那条。
+     */
+    public Optional<MasterTask> findByIdempotencyKey(String idempotencyKey) {
+        if (idempotencyKey == null || idempotencyKey.isBlank()) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(mongoTemplate.findOne(
+                new Query(Criteria.where("idempotencyKey").is(idempotencyKey)), MasterTask.class));
+    }
+
+    /**
+     * 原子扩张主任务的链接总数（自动翻页续采子任务计入总数，使"成功+失败 >= 总数"的终态判定持续成立）。
+     *
+     * @return 扩张后的主任务文档；任务不存在时为空
+     */
+    public Optional<MasterTask> incTotalLinks(String masterTaskId, int delta) {
+        Query query = new Query(Criteria.where("id").is(masterTaskId));
+        Update update = new Update()
+                .inc("totalLinks", delta)
+                .set("updateTime", Instant.now());
+        MasterTask updated = mongoTemplate.findAndModify(
+                query, update, FindAndModifyOptions.options().returnNew(true), MasterTask.class);
+        return Optional.ofNullable(updated);
+    }
+
+    /**
+     * 原子累加一个子任务的终态计数（替代"全量拉取子任务重算"的 O(N²) 收敛）。
+     *
+     * <p>每个子任务到达终态时恰好调用一次：{@code successLinks}/{@code failedLinks}
+     * 各自单调累加，{@code successLinks + failedLinks} 即已完成数，
+     * 与 {@code totalLinks} 比较即可判断是否全部终态，无需扫描子任务集合。
+     *
+     * @return 累加后的主任务文档；主任务不存在时为空
+     */
+    public Optional<MasterTask> recordSubTaskOutcome(String masterTaskId, boolean success) {
+        Query query = new Query(Criteria.where("id").is(masterTaskId));
+        Update update = new Update()
+                .inc(success ? "successLinks" : "failedLinks", 1)
+                .set("updateTime", Instant.now());
+        MasterTask updated = mongoTemplate.findAndModify(
+                query, update, FindAndModifyOptions.options().returnNew(true), MasterTask.class);
+        return Optional.ofNullable(updated);
+    }
+
+    /**
+     * 条件终态迁移：仅当主任务尚未处于终态时写入 COMPLETED / FAILED 并记录完成时间。
+     *
+     * <p>并发下多个子任务同时判断"已全部终态"，只有一个能通过 {@code status nin 终态} 的
+     * 条件更新完成迁移（findAndModify 原子性），其余返回空 —— 终态不会被反复覆盖。
+     *
+     * @return 迁移后的主任务文档；已处于终态（或任务不存在）时为空
+     */
+    public Optional<MasterTask> transitionToTerminalIfFirst(String masterTaskId, long success, long failed) {
+        Query query = new Query(Criteria.where("id").is(masterTaskId)
+                .and("status").nin(TaskStatuses.MASTER_TERMINAL));
+        Update update = new Update()
+                .set("status", TaskStatuses.masterTerminalStatusOf(success, failed))
+                .set("completeTime", Instant.now())
+                .set("updateTime", Instant.now());
+        MasterTask updated = mongoTemplate.findAndModify(
+                query, update, FindAndModifyOptions.options().returnNew(true), MasterTask.class);
+        return Optional.ofNullable(updated);
     }
 }

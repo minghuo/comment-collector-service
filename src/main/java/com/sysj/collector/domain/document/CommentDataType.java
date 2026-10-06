@@ -22,6 +22,13 @@ public final class CommentDataType {
     public static final String DOUYIN_COMMENT = "douyin_comment";
     public static final String XHS_COMMENT = "xhs_comment";
     public static final String TOUTIAO_COMMENT = "toutiao_comment";
+    // 社区类平台（对照 auto-task-web 的集合名）
+    public static final String TIEBA_COMMENT = "tieba_comment";
+    public static final String HONOR_BBS_COMMENT = "honor_bbs_comment";
+    public static final String HUAWEI_BBS_COMMENT = "huawei_bbs_comment";
+    public static final String OPPO_BBS_COMMENT = "oppo_bbs_comment";
+    public static final String VIVO_BBS_COMMENT = "vivo_bbs_comment";
+    public static final String XIAOMI_BBS_COMMENT = "xiaomi_bbs_comment";
 
     /**
      * 由平台编码 + 功能编码推断默认数据类型。
@@ -50,6 +57,24 @@ public final class CommentDataType {
         }
         if ("toutiao".equalsIgnoreCase(platformCode)) {
             return TOUTIAO_COMMENT;
+        }
+        if ("tieba".equalsIgnoreCase(platformCode)) {
+            return TIEBA_COMMENT;
+        }
+        if ("honor_bbs".equalsIgnoreCase(platformCode)) {
+            return HONOR_BBS_COMMENT;
+        }
+        if ("huawei_bbs".equalsIgnoreCase(platformCode)) {
+            return HUAWEI_BBS_COMMENT;
+        }
+        if ("oppo_bbs".equalsIgnoreCase(platformCode)) {
+            return OPPO_BBS_COMMENT;
+        }
+        if ("vivo_bbs".equalsIgnoreCase(platformCode)) {
+            return VIVO_BBS_COMMENT;
+        }
+        if ("xiaomi_bbs".equalsIgnoreCase(platformCode)) {
+            return XIAOMI_BBS_COMMENT;
         }
         // 未登记的平台：退化为平台名 + 功能名，保证仍有可读的判别值
         return platformCode + "_" + (featureCode == null ? "comment" : featureCode);

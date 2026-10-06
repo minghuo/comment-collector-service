@@ -107,7 +107,7 @@ public class ProviderConfigService {
      * 更新指定功能下某供应商的限流速率。
      *
      * <p>更新成功后自动淘汰该功能的配置缓存；调用方还需调用
-     * {@code ProviderRateLimitManager#syncRate} 让令牌桶热更新。
+     * 速率与延迟均为共享状态，下一次取令牌即按新速率执行（令牌桶在 Redis）。
      *
      * @return 命中的文档数；0 表示 platform / feature / providerKey 组合不存在
      */
