@@ -1,6 +1,7 @@
 package com.sysj.collector.controller;
 
 import com.sysj.collector.domain.document.SystemConfig;
+import com.sysj.collector.domain.service.SupplierRegistrySyncService;
 import com.sysj.collector.domain.service.SystemConfigService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -32,6 +33,7 @@ import java.util.Map;
 public class SystemConfigController {
 
     private final SystemConfigService systemConfigService;
+    private final SupplierRegistrySyncService registrySyncService;
 
     /** 全部配置。 */
     @GetMapping
@@ -84,6 +86,27 @@ public class SystemConfigController {
         resp.put("success", removed);
         resp.put("key", key);
         resp.put("message", removed ? "已删除，回退默认值" : "该键不存在（本就在用默认值）");
+        return ResponseEntity.ok(resp);
+    }
+
+    /**
+     * 手动触发供应商注册表同步：按 {@code platform_feature_config} 现状补齐
+     * {@code supplier_state} 条目并给各等级追加缺失的功能项（幂等，在线状态不受影响）。
+     */
+    @PostMapping("/sync-registry")
+    @Operation(summary = "手动触发供应商注册表同步",
+            description = "按 platform_feature_config 补齐 supplier_state 与 user_tier_config 功能项；新增平台/供应商后可立即执行，无需等定时巡检")
+    public ResponseEntity<Map<String, Object>> syncRegistry() {
+        SupplierRegistrySyncService.SyncReport report = registrySyncService.sync();
+        Map<String, Object> resp = new HashMap<>();
+        resp.put("success", true);
+        resp.put("providersRegistered", report.providersRegistered());
+        resp.put("providersAligned", report.providersAligned());
+        resp.put("configuredSuppliers", report.configuredSuppliers());
+        resp.put("supplierStatesAdded", report.supplierStatesAdded());
+        resp.put("tierFeatureEntriesAdded", report.tierFeatureEntriesAdded());
+        resp.put("staleKeys", report.staleKeys());
+        resp.put("message", report.toString());
         return ResponseEntity.ok(resp);
     }
 }

@@ -79,4 +79,40 @@ public class SupplierStateDao {
                 .set("updateTime", Instant.now());
         return mongoTemplate.updateFirst(query, update, SupplierState.class).getMatchedCount() > 0;
     }
+
+    /** 全量查询（注册表同步用）。 */
+    public List<SupplierState> findAll() {
+        return mongoTemplate.findAll(SupplierState.class);
+    }
+
+    /**
+     * 按身份字段补建供应商状态条目（注册表同步用，幂等）。
+     *
+     * <p>身份字段（supplierKey / platformCode / featureCode / providerKey）用 `$set`
+     * 始终对齐配置；运行时状态（熔断/计数/健康）用 `$setOnInsert` 只在**文档不存在**时写初值
+     * —— 已在线的供应商其熔断状态与计数不会被同步任务触碰（与 init 脚本同口径）。
+     *
+     * @return true = 本次新建了文档；false = 文档已存在（仅对齐身份字段）
+     */
+    public boolean upsertIdentity(String supplierKey, String platformCode, String featureCode, String providerKey) {
+        Instant now = Instant.now();
+        Query query = new Query(Criteria.where("_id").is(supplierKey));
+        Update update = new Update()
+                .set("supplierKey", supplierKey)
+                .set("platformCode", platformCode)
+                .set("featureCode", featureCode)
+                .set("providerKey", providerKey)
+                .setOnInsert("circuitState", "CLOSED")
+                .setOnInsert("healthStatus", "UP")
+                .setOnInsert("currentQps", 0.0)
+                .setOnInsert("effectiveQps", 0.0)
+                .setOnInsert("queueDepth", 0)
+                .setOnInsert("consecutiveFailures", 0)
+                .setOnInsert("totalSuccess", 0L)
+                .setOnInsert("totalFailure", 0L)
+                .setOnInsert("avgResponseTime", 0.0)
+                .setOnInsert("lastHeartbeat", now)
+                .setOnInsert("updateTime", now);
+        return mongoTemplate.upsert(query, update, SupplierState.class).getUpsertedId() != null;
+    }
 }

@@ -7,6 +7,7 @@ import com.bewilder.tools.CommonTools;
 import com.sysj.collector.core.provider.CommentProvider;
 import com.sysj.collector.core.provider.Capability;
 import com.sysj.collector.core.provider.ProviderCapability;
+import com.sysj.collector.core.provider.ProviderMeta;
 import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
@@ -41,6 +42,7 @@ import java.util.regex.Pattern;
  * <p>页码分页：{@code nextUrl} = 下一页页码（自动翻页续采回填 {@code extra.page}）。
  */
 @ProviderCapability({ Capability.COMMENT, Capability.SUB_COMMENT, Capability.PAGE_PAGING, Capability.SYNC_SUPPORTED })
+@ProviderMeta(platform = "tieba", feature = "comment", name = "百度贴吧-本地爬虫")
 @Slf4j
 @Component("tieba_local")
 public class TieBaLocalCrawlerProvider implements CommentProvider {
@@ -123,6 +125,7 @@ public class TieBaLocalCrawlerProvider implements CommentProvider {
                     }
                 }
                 boolean hasMore = "1".equals(CommonParser.getJsonPathOne(body, "$.page.has_more"));
+                comments.forEach(c -> c.setMid(kz));
                 return CommonEntity.<Comment>builder().haseMore(hasMore)
                         .nextUrl(hasMore ? String.valueOf(page + 1) : null)
                         .status(CommonStatusEnum.STATUS_SUCCESS).dataList(comments).build();
@@ -154,6 +157,7 @@ public class TieBaLocalCrawlerProvider implements CommentProvider {
                 // 空页（超页请求钳制到末页后 subpost_list 缺失）或已取满 total_count 即无下一页
                 boolean hasMore = CollUtil.isNotEmpty(comments) && totalCount != null
                         && (long) page * FLOOR_PAGE_SIZE < totalCount;
+                comments.forEach(c -> c.setMid(kz));
                 return CommonEntity.<Comment>builder().haseMore(hasMore)
                         .nextUrl(hasMore ? String.valueOf(page + 1) : null)
                         .status(CommonStatusEnum.STATUS_SUCCESS).dataList(comments).build();

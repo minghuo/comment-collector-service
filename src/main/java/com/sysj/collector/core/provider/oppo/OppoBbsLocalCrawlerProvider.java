@@ -6,6 +6,7 @@ import com.bewilder.tools.CommonTools;
 import com.sysj.collector.core.provider.CommentProvider;
 import com.sysj.collector.core.provider.Capability;
 import com.sysj.collector.core.provider.ProviderCapability;
+import com.sysj.collector.core.provider.ProviderMeta;
 import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
@@ -39,6 +40,7 @@ import java.util.regex.Pattern;
  * <p>页码分页：{@code nextUrl} = 下一页页码（自动翻页续采回填 {@code extra.page}）。
  */
 @ProviderCapability({ Capability.COMMENT, Capability.SUB_COMMENT, Capability.PAGE_PAGING, Capability.SYNC_SUPPORTED })
+@ProviderMeta(platform = "oppo_bbs", feature = "comment", name = "OPPO社区-本地爬虫")
 @Slf4j
 @Component("oppo_bbs_local")
 public class OppoBbsLocalCrawlerProvider implements CommentProvider {
@@ -111,6 +113,7 @@ public class OppoBbsLocalCrawlerProvider implements CommentProvider {
                 }
                 boolean hasMore = CollUtil.isNotEmpty(floorStrList) && total != null
                         && (long) page * PAGE_SIZE < total;
+                comments.forEach(c -> c.setMid(tid));
                 return CommonEntity.<Comment>builder().haseMore(hasMore)
                         .nextUrl(hasMore ? String.valueOf(page + 1) : null)
                         .totalPage(CommonTools.totalPage(total, PAGE_SIZE))
@@ -138,6 +141,7 @@ public class OppoBbsLocalCrawlerProvider implements CommentProvider {
                 }
                 boolean hasMore = CollUtil.isNotEmpty(comments) && total != null
                         && (long) page * PAGE_SIZE < total;
+                comments.forEach(c -> c.setMid(tid));
                 return CommonEntity.<Comment>builder().haseMore(hasMore)
                         .nextUrl(hasMore ? String.valueOf(page + 1) : null)
                         .totalPage(CommonTools.totalPage(total, PAGE_SIZE))

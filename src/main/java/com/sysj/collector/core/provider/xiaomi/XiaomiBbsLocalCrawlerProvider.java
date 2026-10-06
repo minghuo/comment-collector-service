@@ -6,6 +6,7 @@ import com.bewilder.tools.CommonTools;
 import com.sysj.collector.core.provider.CommentProvider;
 import com.sysj.collector.core.provider.Capability;
 import com.sysj.collector.core.provider.ProviderCapability;
+import com.sysj.collector.core.provider.ProviderMeta;
 import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
@@ -38,6 +39,7 @@ import java.util.regex.Pattern;
  * <p>游标翻页：{@code nextUrl} = 下一轮 after 值（自动翻页续采回填 {@code extra.cursor}）。
  */
 @ProviderCapability({ Capability.COMMENT, Capability.SUB_COMMENT, Capability.CURSOR_PAGING, Capability.SYNC_SUPPORTED })
+@ProviderMeta(platform = "xiaomi_bbs", feature = "comment", name = "小米社区-本地爬虫")
 @Slf4j
 @Component("xiaomi_bbs_local")
 public class XiaomiBbsLocalCrawlerProvider implements CommentProvider {
@@ -108,7 +110,8 @@ public class XiaomiBbsLocalCrawlerProvider implements CommentProvider {
                         comments.addAll(Comment.buildFromXiaomiBbsWithReplies(commentStr, null));
                     }
                 }
-                return CommonEntity.<Comment>builder()
+                comments.forEach(c -> c.setMid(postId));
+                        return CommonEntity.<Comment>builder()
                         .haseMore(hasMore)
                         .nextUrl(hasMore ? String.valueOf(after + PAGE_SIZE) : null)
                         .totalPage(CommonTools.totalPage(CommonTools.stringToInteger(
@@ -138,7 +141,8 @@ public class XiaomiBbsLocalCrawlerProvider implements CommentProvider {
                 }
                 String next = hasMore && !comments.isEmpty()
                         ? comments.get(comments.size() - 1).getCommentId() : null;
-                return CommonEntity.<Comment>builder()
+                comments.forEach(c -> c.setMid(postId));
+                        return CommonEntity.<Comment>builder()
                         .haseMore(hasMore)
                         .nextUrl(next)
                         .totalPage(CommonTools.totalPage(CommonTools.stringToInteger(

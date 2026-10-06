@@ -7,6 +7,7 @@ import com.sysj.collector.constants.SyConstants;
 import com.sysj.collector.core.provider.CommentProvider;
 import com.sysj.collector.core.provider.Capability;
 import com.sysj.collector.core.provider.ProviderCapability;
+import com.sysj.collector.core.provider.ProviderMeta;
 import com.sysj.collector.core.provider.support.ProviderHeaders;
 import com.sysj.collector.exception.CollectorException;
 import com.sysj.collector.model.Comment;
@@ -44,6 +45,7 @@ import java.util.Objects;
  * {@code mp.weixin.qq.com/s?__biz=...}），临时链接无法采到评论。
  */
 @ProviderCapability({ Capability.COMMENT, Capability.SUB_COMMENT, Capability.PAGE_PAGING, Capability.SYNC_SUPPORTED })
+@ProviderMeta(platform = "wechat", feature = "comment", name = "公众号-系统接口")
 @Slf4j
 @Component("wechat_sy")
 public class WechatCommentCrawlerProvider implements CommentProvider {

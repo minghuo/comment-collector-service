@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sysj.collector.core.provider.CommentProvider;
 import com.sysj.collector.core.provider.Capability;
 import com.sysj.collector.core.provider.ProviderCapability;
+import com.sysj.collector.core.provider.ProviderMeta;
 import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
@@ -44,6 +45,7 @@ import java.util.regex.Pattern;
  * <p>页码分页：{@code nextUrl} = 下一页页码（自动翻页续采回填 {@code extra.page}）。
  */
 @ProviderCapability({ Capability.COMMENT, Capability.PAGE_PAGING, Capability.SYNC_SUPPORTED })
+@ProviderMeta(platform = "honor_bbs", feature = "comment", name = "荣耀社区-本地爬虫")
 @Slf4j
 @Component("honor_bbs_local")
 public class HonorBbsLocalCrawlerProvider implements CommentProvider {
@@ -126,6 +128,7 @@ public class HonorBbsLocalCrawlerProvider implements CommentProvider {
                 }
                 int totalPages = totalPages(body, mid);
                 boolean hasMore = page < totalPages;
+                comments.forEach(c -> c.setMid(mid));
                 // 楼层渲染正常即成功（仅"楼主"层无回复的帖子为合法的空数据）
                 return CommonEntity.<Comment>builder().haseMore(hasMore)
                         .nextUrl(hasMore ? String.valueOf(page + 1) : null)

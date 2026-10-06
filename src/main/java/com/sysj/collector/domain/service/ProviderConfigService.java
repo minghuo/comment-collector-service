@@ -61,6 +61,22 @@ public class ProviderConfigService {
         return userTierConfigDao.findByTierCode(tierCode);
     }
 
+    /**
+     * 解析用户等级在某功能下的供应商偏好（**含等级继承**）。
+     *
+     * <p>沿 {@code parentTierCode} 父链向上查找该功能的配置项，最近声明者优先：
+     * 本等级未声明时继承父等级的整条配置（含 providerOrder 与 activationThreshold），
+     * 声明了则整条覆盖。整条链都未声明返回 empty（调用方回退全局 priority 排序）。
+     *
+     * <p>因此新增平台/功能只需配置到基础等级，所有高等级自动获得 —— 无需逐等级重复配置。
+     * 链上每个等级的读取都走 {@code loadUserTierConfig} 的 Caffeine 缓存，开销可忽略；
+     * 运维改完父等级配置淘汰该等级缓存后，继承它的子等级**自动**拿到新值（解析时实时上溯）。
+     */
+    public Optional<UserTierConfig.FeatureProviderConfig> resolveFeaturePreference(
+            String tierCode, String platformCode, String featureCode) {
+        return TierFeatureResolver.resolve(this::loadUserTierConfig, tierCode, platformCode, featureCode);
+    }
+
     // ── 缓存管理 ───────────────────────────────────────────────────────────
 
     /**

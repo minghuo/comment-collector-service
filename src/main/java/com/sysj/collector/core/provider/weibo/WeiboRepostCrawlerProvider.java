@@ -6,6 +6,7 @@ import com.bewilder.tools.CommonTools;
 import com.sysj.collector.core.provider.CommentProvider;
 import com.sysj.collector.core.provider.Capability;
 import com.sysj.collector.core.provider.ProviderCapability;
+import com.sysj.collector.core.provider.ProviderMeta;
 import com.sysj.collector.core.provider.support.ProviderHeaders;
 import com.sysj.collector.exception.CollectorException;
 import com.sysj.collector.model.Comment;
@@ -39,6 +40,7 @@ import java.util.Map;
  * </ul>
  */
 @ProviderCapability({ Capability.COMMENT, Capability.PAGE_PAGING, Capability.CURSOR_PAGING, Capability.LOGIN_STATE, Capability.PROXY, Capability.SYNC_SUPPORTED })
+@ProviderMeta(platform = "weibo", feature = "repost", name = "微博-转发本地爬虫")
 @Slf4j
 @Component("weibo_repost_local")
 public class WeiboRepostCrawlerProvider implements CommentProvider {

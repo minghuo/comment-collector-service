@@ -7,6 +7,7 @@ import com.bewilder.tools.CommonTools;
 import com.sysj.collector.core.provider.CommentProvider;
 import com.sysj.collector.core.provider.Capability;
 import com.sysj.collector.core.provider.ProviderCapability;
+import com.sysj.collector.core.provider.ProviderMeta;
 import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
@@ -41,6 +42,7 @@ import java.util.regex.Pattern;
  * <p>页码分页：{@code nextUrl} = 下一页页码（自动翻页续采回填 {@code extra.page}）。
  */
 @ProviderCapability({ Capability.COMMENT, Capability.SUB_COMMENT, Capability.PAGE_PAGING, Capability.SYNC_SUPPORTED })
+@ProviderMeta(platform = "huawei_bbs", feature = "comment", name = "华为社区-本地爬虫")
 @Slf4j
 @Component("huawei_bbs_local")
 public class HuaweiBbsLocalCrawlerProvider implements CommentProvider {
@@ -109,7 +111,7 @@ public class HuaweiBbsLocalCrawlerProvider implements CommentProvider {
             String body = httpUtil.postJsonString(SGW_BASE + "topicComment/1",
                     paramsJson.toJSONString(), sgwHeaders(APP_ID_CONTENT));
             if (StringUtils.isNotBlank(body) && "0".equals(CommonParser.getJsonPathOne(body, "$.errcode"))) {
-                return toPageResult(body, page);
+                return toPageResult(body, page, tid);
             }
             log.warn("[huawei-bbs-local] 主评论响应异常: tid={} page={}", tid, page);
         } catch (Exception e) {
@@ -130,7 +132,7 @@ public class HuaweiBbsLocalCrawlerProvider implements CommentProvider {
             String body = httpUtil.postJsonString(SGW_BASE + "subComment/1",
                     paramsJson.toJSONString(), sgwHeaders(APP_ID_COMMENT));
             if (StringUtils.isNotBlank(body) && "0".equals(CommonParser.getJsonPathOne(body, "$.errcode"))) {
-                return toPageResult(body, page);
+                return toPageResult(body, page, tid);
             }
             log.warn("[huawei-bbs-local] 子回复响应异常: tid={} commentId={} page={}", tid, commentId, page);
         } catch (Exception e) {
@@ -141,7 +143,7 @@ public class HuaweiBbsLocalCrawlerProvider implements CommentProvider {
     }
 
     /** topicComment/subComment 共用解析：data 数组 → Comment，空页或取满 totalNum 即无下一页。 */
-    private static CommonEntity<Comment> toPageResult(String body, int page) {
+    private static CommonEntity<Comment> toPageResult(String body, int page, String mid) {
         Integer totalNum = CommonTools.stringToInteger(CommonParser.getJsonPathOne(body, "$.totalNum"));
         List<Comment> comments = new ArrayList<>();
         List<String> commentStrList = CommonParser.getJsonPathMany(body, "$.data");
@@ -152,6 +154,7 @@ public class HuaweiBbsLocalCrawlerProvider implements CommentProvider {
         }
         boolean hasMore = CollUtil.isNotEmpty(comments) && totalNum != null
                 && (long) page * PAGE_SIZE < totalNum;
+        comments.forEach(c -> c.setMid(mid));
         return CommonEntity.<Comment>builder().haseMore(hasMore)
                 .nextUrl(hasMore ? String.valueOf(page + 1) : null)
                 .totalPage(CommonTools.totalPage(totalNum, PAGE_SIZE))

@@ -15,13 +15,24 @@ import java.util.List;
  *
  * <p>一个文档 = 一个用户等级，内嵌该等级在各平台/功能下的供应商偏好配置。
  *
+ * <h3>等级继承（避免跨等级重复配置）</h3>
+ * 通过 {@link #parentTierCode} 形成单父继承链（如 ENTERPRISE → VIP → NORMAL）：
+ * <ul>
+ *   <li>本等级未声明某功能的偏好时，**沿父链向上查找**，命中即用（整条继承，含阈值）；</li>
+ *   <li>本等级声明的功能项**覆盖**父链同名功能项（整条覆盖，不支持字段级合并）；</li>
+ *   <li>因此新增平台/功能只需配置到基础等级（无父等级的 tier），所有高等级自动获得；
+ *       高等级只在"要与低等级不同"时才写覆盖项。</li>
+ * </ul>
+ * 解析逻辑见 {@code TierFeatureResolver}；注册表同步只向基础等级补缺失功能项。
+ *
  * <pre>
  * {
  *   "_id": ObjectId("..."),
  *   "tierCode": "VIP",
+ *   "parentTierCode": "NORMAL",
  *   "priority": 10,
  *   "description": "VIP用户",
- *   "featureConfigs": [
+ *   "featureConfigs": [   // 只写与 NORMAL 不同的覆盖项；未写的继承 NORMAL
  *     {
  *       "platformCode": "weibo",
  *       "featureCode": "comment",
@@ -47,6 +58,15 @@ public class UserTierConfig {
     private String tierCode;
 
     /**
+     * 父等级编码（可空）。
+     *
+     * <p>非空时本等级**继承**父等级的全部功能偏好：本等级未声明的功能沿父链向上查找，
+     * 命中即用；声明了的功能项整条覆盖父链同名项。null/空 = 基础等级（配置全集挂在这里，
+     * 注册表同步也只向基础等级补缺失功能项）。必须无环。
+     */
+    private String parentTierCode;
+
+    /**
      * 调度优先级，越小越优先处理。
      * 用于多用户并发时的任务队列排序。
      */
@@ -57,7 +77,8 @@ public class UserTierConfig {
 
     /**
      * 该等级在各功能下的供应商偏好配置列表。
-     * 按需配置，未配置的功能回退到全局 priority 排序。
+     * <b>只需声明与父等级不同的覆盖项</b>：未配置的功能沿 {@link #parentTierCode} 继承，
+     * 整条继承链都未配置时回退到全局 priority 排序。
      */
     private List<FeatureProviderConfig> featureConfigs;
 

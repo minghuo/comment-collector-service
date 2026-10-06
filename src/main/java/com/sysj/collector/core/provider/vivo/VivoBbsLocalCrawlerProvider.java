@@ -8,6 +8,7 @@ import com.bewilder.tools.CommonTools;
 import com.sysj.collector.core.provider.CommentProvider;
 import com.sysj.collector.core.provider.Capability;
 import com.sysj.collector.core.provider.ProviderCapability;
+import com.sysj.collector.core.provider.ProviderMeta;
 import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
@@ -44,6 +45,7 @@ import java.util.regex.Pattern;
  * <p>游标翻页：{@code nextUrl} = 最后一条顶层/回复评论 id（自动翻页续采回填 {@code extra.lastId}）。
  */
 @ProviderCapability({ Capability.COMMENT, Capability.SUB_COMMENT, Capability.CURSOR_PAGING, Capability.SYNC_SUPPORTED })
+@ProviderMeta(platform = "vivo_bbs", feature = "comment", name = "vivo社区-本地爬虫")
 @Slf4j
 @Component("vivo_bbs_local")
 public class VivoBbsLocalCrawlerProvider implements CommentProvider {
@@ -118,6 +120,7 @@ public class VivoBbsLocalCrawlerProvider implements CommentProvider {
                             }
                         }
                     }
+                    comments.forEach(c -> c.setMid(tid));
                     return CommonEntity.<Comment>builder().haseMore(hasMore).totalPage(totalPage)
                             .nextUrl(hasMore ? lastTopId : null)
                             .status(CommonStatusEnum.STATUS_SUCCESS).dataList(comments).build();
@@ -152,6 +155,7 @@ public class VivoBbsLocalCrawlerProvider implements CommentProvider {
                     for (String commentStr : commentStrList) {
                         comments.add(Comment.buildFromVivoBbs(commentStr));
                     }
+                    comments.forEach(c -> c.setMid(tid));
                     return CommonEntity.<Comment>builder().haseMore(hasMore).totalPage(totalPage)
                             .nextUrl(hasMore ? comments.get(comments.size() - 1).getCommentId() : null)
                             .status(CommonStatusEnum.STATUS_SUCCESS).dataList(comments).build();

@@ -174,11 +174,18 @@ const FEATURE_CONFIGS = [
   },
 ];
 
-/** 用户等级：priority 越小越优先；activationThreshold 见 user_tier_config 注释 */
+/**
+ * 用户等级：priority 越小越优先；activationThreshold 见 user_tier_config 注释。
+ *
+ * parentTierCode 形成继承链 ENTERPRISE → VIP → NORMAL（NORMAL 为基础等级）：
+ * 高等级默认继承低等级的全部功能偏好；seed 为了保留各等级原有的 activation_threshold
+ * 差异仍为每个等级写全量 feature_configs —— 运维可按需把高等级裁剪成"只留覆盖项"，
+ * 此后新增平台只配到 NORMAL 即可被全部等级继承（注册表同步只补基础等级）。
+ */
 const TIERS = [
-  { tier_code: 'ENTERPRISE', priority: 1, description: '企业用户（最高优先级）', activationThreshold: 0 },
-  { tier_code: 'VIP', priority: 10, description: 'VIP用户', activationThreshold: 3 },
-  { tier_code: 'NORMAL', priority: 100, description: '普通用户', activationThreshold: 10 },
+  { tier_code: 'ENTERPRISE', parentTierCode: 'VIP', priority: 1, description: '企业用户（最高优先级）', activationThreshold: 0 },
+  { tier_code: 'VIP', parentTierCode: 'NORMAL', priority: 10, description: 'VIP用户', activationThreshold: 3 },
+  { tier_code: 'NORMAL', parentTierCode: null, priority: 100, description: '普通用户（基础等级，平台全集挂这里）', activationThreshold: 10 },
 ];
 
 const now = new Date();
@@ -221,6 +228,10 @@ for (const tier of TIERS) {
   const doc = {
     _id: 'tier:' + tier.tier_code,
     tier_code: tier.tier_code,
+    // 父等级（单父继承链）：本等级未声明某功能的偏好时沿父链向上继承整条配置，
+    // 声明了的整条覆盖。新增平台/功能只需配置到基础等级（无 parent_tier_code 的等级），
+    // 高等级自动继承 —— 注册表同步也只向基础等级补缺失功能项。
+    parent_tier_code: tier.parentTierCode || null,
     priority: tier.priority,
     description: tier.description,
     feature_configs: featureConfigs,

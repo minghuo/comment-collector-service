@@ -5,6 +5,7 @@ import com.bewilder.parser.CommonParser;
 import com.sysj.collector.core.provider.CommentProvider;
 import com.sysj.collector.core.provider.Capability;
 import com.sysj.collector.core.provider.ProviderCapability;
+import com.sysj.collector.core.provider.ProviderMeta;
 import com.sysj.collector.core.provider.support.ProviderHeaders;
 import com.sysj.collector.exception.CollectorException;
 import com.sysj.collector.model.Comment;
@@ -43,6 +44,7 @@ import java.util.Map;
  * {@code haseMore} 表示还有下一页，{@code nextUrl} 为下一页 {@code maxId}（调用方回填到 {@code extra.maxId} 继续翻页）。
  */
 @ProviderCapability({ Capability.COMMENT, Capability.CURSOR_PAGING, Capability.LOGIN_STATE, Capability.PROXY, Capability.SYNC_SUPPORTED })
+@ProviderMeta(platform = "weibo", feature = "comment", name = "微博-本地爬虫")
 @Slf4j
 @Component("local_crawler")
 public class WeiboLocalCrawlerProvider implements CommentProvider {

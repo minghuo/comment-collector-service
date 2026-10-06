@@ -505,18 +505,13 @@ public class CommentCollectionFacade {
         }
     }
 
+    /**
+     * 用户等级供应商偏好（含等级继承）：本等级未声明时沿 parentTierCode 继承父等级的
+     * 整条配置（最近声明者优先），解析细节见 {@code ProviderConfigService#resolveFeaturePreference}。
+     */
     private FeatureProviderConfig resolveFeaturePreference(
             String tierCode, String platformCode, String featureCode) {
-
-        if (tierCode == null) return null;
-        return configService.loadUserTierConfig(tierCode)
-                .flatMap(tierConfig -> {
-                    if (tierConfig.getFeatureConfigs() == null) return Optional.empty();
-                    return tierConfig.getFeatureConfigs().stream()
-                            .filter(fc -> platformCode.equals(fc.getPlatformCode())
-                                    && featureCode.equals(fc.getFeatureCode()))
-                            .findFirst();
-                })
+        return configService.resolveFeaturePreference(tierCode, platformCode, featureCode)
                 .orElse(null);
     }
 

@@ -7,6 +7,7 @@ import com.sysj.collector.core.provider.support.ProviderUrls;
 import com.sysj.collector.core.provider.CommentProvider;
 import com.sysj.collector.core.provider.Capability;
 import com.sysj.collector.core.provider.ProviderCapability;
+import com.sysj.collector.core.provider.ProviderMeta;
 import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
@@ -38,6 +39,7 @@ import java.util.Map;
  * </ul>
  */
 @ProviderCapability({ Capability.COMMENT, Capability.SUB_COMMENT, Capability.PAGE_PAGING, Capability.PROXY, Capability.SYNC_SUPPORTED })
+@ProviderMeta(platform = "toutiao", feature = "comment", name = "今日头条-本地爬虫")
 @Slf4j
 @Component("toutiao_local")
 public class TouTiaoLocalCrawlerProvider implements CommentProvider {

@@ -123,6 +123,52 @@ public class PlatformFeatureConfigDao {
     }
 
     /**
+     * 供应商自动注册（**代码即配置**，幂等）：把注解声明的供应商写入功能配置。
+     *
+     * <ol>
+     *   <li>功能文档不存在 → 创建（status=true，单供应商）；</li>
+     *   <li>文档存在但缺该 providerKey → 追加数组元素（注解里的参数只是初值）；</li>
+     *   <li>已存在 → 只把 capabilities 对齐为代码声明（{@code $} 位置操作符），
+     *       运维调过的速率/优先级/健康开关等参数一律不动。</li>
+     * </ol>
+     *
+     * @return 注册结果：CREATED_FEATURE / ADDED / ALIGNED / EXISTS
+     */
+    public String upsertProvider(String platformCode, String featureCode, String featureName,
+                                 PlatformFeatureConfig.ProviderConfig provider) {
+        String docId = platformCode + ":" + featureCode;
+        boolean docExists = mongoTemplate.exists(
+                Query.query(Criteria.where("_id").is(docId)), PlatformFeatureConfig.class);
+        if (!docExists) {
+            PlatformFeatureConfig doc = new PlatformFeatureConfig();
+            doc.setId(docId);
+            doc.setPlatformCode(platformCode);
+            doc.setFeatureCode(featureCode);
+            doc.setFeatureName(featureName == null || featureName.isBlank()
+                    ? platformCode + "/" + featureCode : featureName);
+            doc.setStatus(true);
+            doc.setProviders(new java.util.ArrayList<>(List.of(provider)));
+            try {
+                mongoTemplate.insert(doc);
+                return "CREATED_FEATURE";
+            } catch (org.springframework.dao.DuplicateKeyException e) {
+                // 并发创建竞争：文档已被其他实例建出，落到下面的追加/对齐逻辑
+            }
+        }
+        Query absent = Query.query(Criteria.where("_id").is(docId)
+                .and("providers.providerKey").ne(provider.getProviderKey()));
+        if (mongoTemplate.updateFirst(absent, new Update().push("providers", provider),
+                PlatformFeatureConfig.class).getModifiedCount() > 0) {
+            return "ADDED";
+        }
+        UpdateResult aligned = mongoTemplate.updateFirst(
+                providerElementQuery(platformCode, featureCode, provider.getProviderKey()),
+                new Update().set("providers.$.capabilities", provider.getCapabilities()),
+                PlatformFeatureConfig.class);
+        return aligned.getMatchedCount() > 0 ? "ALIGNED" : "EXISTS";
+    }
+
+    /**
      * 未命中时给出明确告警，避免字段名/取值写错导致"静默更新 0 条"。
      */
     private void warnIfNotMatched(String action, UpdateResult result,
