@@ -61,9 +61,20 @@ public class RedisHealthMonitor {
         if (available) {
             available = false;
             degradedSince = System.currentTimeMillis();
+            // 完整堆栈入日志：Spring 6 起 getMessage() 不再拼接 cause，
+            // 只打 message 会丢掉真正的服务端错误（如 BUSYGROUP / no such key）
             log.error("Redis 操作失败，进入降级模式（任务落本地兜底队列，熔断/限流放行兜底）: op={} error={}",
-                    op, cause.getMessage());
+                    op, rootMessage(cause), cause);
         }
+    }
+
+    /** 异常链最底层的可读消息。 */
+    private static String rootMessage(Throwable e) {
+        Throwable cur = e;
+        while (cur.getCause() != null && cur.getCause() != cur) {
+            cur = cur.getCause();
+        }
+        return cur.getMessage();
     }
 
     /** 探活成功 → 恢复。 */

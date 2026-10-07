@@ -12,6 +12,7 @@ import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
 import com.sysj.collector.model.CommonStatusEnum;
+import com.sysj.collector.core.provider.support.HttpUtilProvider;
 import com.sysj.http.HttpUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -49,7 +50,7 @@ import java.util.Map;
 @Component("local_crawler")
 public class WeiboLocalCrawlerProvider implements CommentProvider {
 
-    private static final HttpUtil httpUtil = new HttpUtil.Builder().directFallbackOnProxyFailure(true).build();
+    private static final HttpUtil httpUtil = HttpUtilProvider.localClient();
 
     private static final String API_URL = "https://weibo.com/ajax/statuses/buildComments";
     private static final int RETRY = 3;

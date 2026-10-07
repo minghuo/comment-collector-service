@@ -14,6 +14,7 @@ import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
 import com.sysj.collector.model.CommonStatusEnum;
+import com.sysj.collector.core.provider.support.HttpUtilProvider;
 import com.sysj.http.HttpUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -45,7 +46,7 @@ import java.util.Map;
 @Component("wechat_video_sy")
 public class WechatVideoCommentCrawlerProvider implements CommentProvider {
 
-    private static final HttpUtil httpUtil = new HttpUtil.Builder().build();
+    private static final HttpUtil httpUtil = HttpUtilProvider.apiClient();
 
     private static final String COMMENT_URL = "api/v1/wechat-channels/video/comments";
     private static final int RETRY = 3;

@@ -12,6 +12,7 @@ import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
 import com.sysj.collector.model.CommonStatusEnum;
+import com.sysj.collector.core.provider.support.HttpUtilProvider;
 import com.sysj.http.HttpUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -44,7 +45,7 @@ import java.util.Map;
 @Component("toutiao_local")
 public class TouTiaoLocalCrawlerProvider implements CommentProvider {
 
-    private static final HttpUtil httpUtil = new HttpUtil.Builder().directFallbackOnProxyFailure(true).build();
+    private static final HttpUtil httpUtil = HttpUtilProvider.localClient();
 
     private static final String UA = "News 7.7.3 rv:7.7.3.21 (iPhone; iOS 12.3.1; zh_CN) Cronet";
     private static final int PAGE_SIZE = 20;
@@ -59,7 +60,7 @@ public class TouTiaoLocalCrawlerProvider implements CommentProvider {
         Map<String, String> extra = request.getExtra() == null ? Map.of() : request.getExtra();
         String mid = ProviderUrls.resolveMid(extra.get("mid"), request.getFromUrl(), request.getTargetId());
         String commentId = extra.get("commentId");
-        int page = Math.max(1, CommonTools.stringToInteger(extra.get("page")));
+        int page = Math.max(1, CommonTools.stringToInteger(StringUtils.defaultIfBlank(extra.get("page"), "1")));
         log.info("[toutiao-local] 采集开始: mid={} commentId={} page={}", mid, commentId, page);
 
         if (StringUtils.isBlank(commentId)) {

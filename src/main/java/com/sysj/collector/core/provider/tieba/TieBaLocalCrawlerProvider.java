@@ -12,6 +12,7 @@ import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
 import com.sysj.collector.model.CommonStatusEnum;
+import com.sysj.collector.core.provider.support.HttpUtilProvider;
 import com.sysj.http.HttpUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -22,6 +23,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -42,12 +44,13 @@ import java.util.regex.Pattern;
  * <p>页码分页：{@code nextUrl} = 下一页页码（自动翻页续采回填 {@code extra.page}）。
  */
 @ProviderCapability({ Capability.COMMENT, Capability.SUB_COMMENT, Capability.PAGE_PAGING, Capability.SYNC_SUPPORTED })
-@ProviderMeta(platform = "tieba", feature = "comment", name = "百度贴吧-本地爬虫")
+@ProviderMeta(platform = "tieba", feature = "comment", name = "百度贴吧-本地爬虫",
+            ratePerSecond = 2.0, maxConcurrency = 4, flowEffect = "THROTTLE_QUEUE", maxQueueWaitMs = 30000)
 @Slf4j
 @Component("tieba_local")
 public class TieBaLocalCrawlerProvider implements CommentProvider {
 
-    private static final HttpUtil httpUtil = new HttpUtil.Builder().directFallbackOnProxyFailure(true).build();
+    private static final HttpUtil httpUtil = HttpUtilProvider.localClient();
 
     private static final String PAGE_API = "https://tieba.baidu.com/c/f/pb/page_pc";
     private static final String FLOOR_API = "https://tieba.baidu.com/c/f/pb/floor";
@@ -78,7 +81,7 @@ public class TieBaLocalCrawlerProvider implements CommentProvider {
                     .msg("无法从链接解析贴吧帖子 kz").status(CommonStatusEnum.STATUS_URL_ERROR).build();
         }
         String commentId = extra.get("commentId");
-        int page = Math.max(1, CommonTools.stringToInteger(extra.get("page")));
+        int page = Math.max(1, CommonTools.stringToInteger(StringUtils.defaultIfBlank(extra.get("page"), "1")));
         log.info("[tieba-local] 采集开始: kz={} commentId={} page={}", kz, commentId, page);
 
         return StringUtils.isBlank(commentId) ? getComment(kz, page) : getCommentChild(kz, commentId, page);
@@ -86,7 +89,8 @@ public class TieBaLocalCrawlerProvider implements CommentProvider {
 
     /** 从 extra.mid / fromUrl / targetId 解析帖子 kz。 */
     static String resolveKz(String mid, String fromUrl, String targetId) {
-        for (String candidate : List.of(mid, fromUrl, targetId)) {
+        for (String candidate : java.util.stream.Stream.of(mid, fromUrl, targetId)
+                    .filter(Objects::nonNull).toList()) {
             if (StringUtils.isBlank(candidate)) {
                 continue;
             }

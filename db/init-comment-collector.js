@@ -124,7 +124,7 @@ const FEATURE_CONFIGS = [
     feature_name: '百度贴吧评论采集',
     providers: [
       // 贴吧官方接口，无登录 cookie 可用；主列表 15 楼/页，楼中楼 30 条/页
-      { provider_key: 'tieba_local', name: '百度贴吧-本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
+      { provider_key: 'tieba_local', name: '百度贴吧-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -133,7 +133,7 @@ const FEATURE_CONFIGS = [
     feature_name: '荣耀社区评论采集',
     providers: [
       // Discuz 页面直出 HTML + XPath 解析；回复全部内嵌页面，无子回复接口（不声明 SUB_COMMENT）
-      { provider_key: 'honor_bbs_local', name: '荣耀社区-本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
+      { provider_key: 'honor_bbs_local', name: '荣耀社区-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -142,7 +142,7 @@ const FEATURE_CONFIGS = [
     feature_name: '华为社区评论采集',
     providers: [
       // vmall 俱乐部 SGW 网关接口（SGW-APP-ID 内置于实现）；页码分页
-      { provider_key: 'huawei_bbs_local', name: '华为社区-本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
+      { provider_key: 'huawei_bbs_local', name: '华为社区-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -151,7 +151,7 @@ const FEATURE_CONFIGS = [
     feature_name: 'OPPO社区评论采集',
     providers: [
       // www.oppo.cn 官方 UGC 接口（GET JSON，无需签名）；页码分页
-      { provider_key: 'oppo_bbs_local', name: 'OPPO社区-本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
+      { provider_key: 'oppo_bbs_local', name: 'OPPO社区-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -160,7 +160,7 @@ const FEATURE_CONFIGS = [
     feature_name: 'vivo社区评论采集',
     providers: [
       // bbs.vivo.com.cn 官方接口（nonce 签名内置于实现）；lastId 键集翻页
-      { provider_key: 'vivo_bbs_local', name: 'vivo社区-本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
+      { provider_key: 'vivo_bbs_local', name: 'vivo社区-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -169,7 +169,7 @@ const FEATURE_CONFIGS = [
     feature_name: '小米社区评论采集',
     providers: [
       // api.vip.miui.com 官方接口（GET，无需签名）；after 游标（主列表=偏移量，回复=末条回复 id）
-      { provider_key: 'xiaomi_bbs_local', name: '小米社区-本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
+      { provider_key: 'xiaomi_bbs_local', name: '小米社区-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
     ],
   },
 ];

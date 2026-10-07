@@ -13,6 +13,7 @@ import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
 import com.sysj.collector.model.CommonStatusEnum;
+import com.sysj.collector.core.provider.support.HttpUtilProvider;
 import com.sysj.http.HttpUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -43,7 +44,7 @@ import java.util.Map;
 @Component("douyin_golaxy")
 public class DouyinGolaxyCrawlerProvider implements CommentProvider {
 
-    private static final HttpUtil httpUtil = new HttpUtil.Builder().build();
+    private static final HttpUtil httpUtil = HttpUtilProvider.apiClient();
 
     private static final int RETRY = 3;
 
@@ -57,7 +58,7 @@ public class DouyinGolaxyCrawlerProvider implements CommentProvider {
         Map<String, String> extra = request.getExtra() == null ? Map.of() : request.getExtra();
         String mid = ProviderUrls.resolveMid(extra.get("mid"), request.getFromUrl(), request.getTargetId());
         String commentId = extra.get("commentId");
-        int page = Math.max(1, CommonTools.stringToInteger(extra.get("page")));
+        int page = Math.max(1, CommonTools.stringToInteger(StringUtils.defaultIfBlank(extra.get("page"), "1")));
         log.info("[dy-golaxy] 采集开始: mid={} commentId={} page={}", mid, commentId, page);
 
         if (StringUtils.isBlank(mid)) {

@@ -52,4 +52,10 @@ public @interface ProviderMeta {
 
     /** 新条目的单次调用超时初值（毫秒）。 */
     long timeoutMs() default 20000;
+
+    /** 新条目的流控效果初值：REJECT（默认）/ WARM_UP / THROTTLE_QUEUE。 */
+    String flowEffect() default "REJECT";
+
+    /** 新条目的 THROTTLE_QUEUE 最长排队等待初值（毫秒）。 */
+    long maxQueueWaitMs() default 0;
 }

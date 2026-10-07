@@ -13,6 +13,7 @@ import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
 import com.sysj.collector.model.CommonStatusEnum;
+import com.sysj.collector.core.provider.support.HttpUtilProvider;
 import com.sysj.http.HttpUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -43,7 +44,7 @@ import java.util.Map;
 @Component("xhs_golaxy")
 public class XhsGolaxyCrawlerProvider implements CommentProvider {
 
-    private static final HttpUtil httpUtil = new HttpUtil.Builder().build();
+    private static final HttpUtil httpUtil = HttpUtilProvider.apiClient();
 
     private static final int RETRY = 3;
 

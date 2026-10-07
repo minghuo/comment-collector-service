@@ -13,6 +13,7 @@ import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
 import com.sysj.collector.model.CommonStatusEnum;
+import com.sysj.collector.core.provider.support.HttpUtilProvider;
 import com.sysj.http.HttpUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -22,6 +23,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -45,12 +47,13 @@ import java.util.regex.Pattern;
  * <p>页码分页：{@code nextUrl} = 下一页页码（自动翻页续采回填 {@code extra.page}）。
  */
 @ProviderCapability({ Capability.COMMENT, Capability.PAGE_PAGING, Capability.SYNC_SUPPORTED })
-@ProviderMeta(platform = "honor_bbs", feature = "comment", name = "荣耀社区-本地爬虫")
+@ProviderMeta(platform = "honor_bbs", feature = "comment", name = "荣耀社区-本地爬虫",
+            ratePerSecond = 2.0, maxConcurrency = 4, flowEffect = "THROTTLE_QUEUE", maxQueueWaitMs = 30000)
 @Slf4j
 @Component("honor_bbs_local")
 public class HonorBbsLocalCrawlerProvider implements CommentProvider {
 
-    private static final HttpUtil httpUtil = new HttpUtil.Builder().directFallbackOnProxyFailure(true).build();
+    private static final HttpUtil httpUtil = HttpUtilProvider.localClient();
 
     private static final String THREAD_URL_FORMAT = "https://club.honor.com/cn/thread-%s-%d-1.html";
 
@@ -84,14 +87,15 @@ public class HonorBbsLocalCrawlerProvider implements CommentProvider {
             return CommonEntity.<Comment>builder().haseMore(false)
                     .msg("无法从链接解析荣耀社区帖子 tid").status(CommonStatusEnum.STATUS_URL_ERROR).build();
         }
-        int page = Math.max(1, CommonTools.stringToInteger(extra.get("page")));
+        int page = Math.max(1, CommonTools.stringToInteger(StringUtils.defaultIfBlank(extra.get("page"), "1")));
         log.info("[honor-bbs-local] 采集开始: tid={} page={}", tid, page);
         return getComment(tid, page);
     }
 
     /** 从 extra.mid / fromUrl / targetId 解析帖子 tid。 */
     static String resolveTid(String mid, String fromUrl, String targetId) {
-        for (String candidate : List.of(mid, fromUrl, targetId)) {
+        for (String candidate : java.util.stream.Stream.of(mid, fromUrl, targetId)
+                    .filter(Objects::nonNull).toList()) {
             if (StringUtils.isBlank(candidate)) {
                 continue;
             }

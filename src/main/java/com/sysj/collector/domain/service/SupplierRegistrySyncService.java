@@ -199,6 +199,8 @@ public class SupplierRegistrySyncService {
         config.setHealthy(true);
         config.setMaxConcurrency(meta.maxConcurrency());
         config.setTimeoutMs(meta.timeoutMs());
+        config.setFlowEffect(meta.flowEffect());
+        config.setMaxQueueWaitMs(meta.maxQueueWaitMs());
         ProviderCapability capability = AnnotationUtils.findAnnotation(
                 provider.getClass(), ProviderCapability.class);
         config.setCapabilities(capability == null ? List.of()

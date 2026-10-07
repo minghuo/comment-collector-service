@@ -23,6 +23,8 @@ import org.springframework.stereotype.Component;
 import jakarta.annotation.PostConstruct;
 
 import java.time.Duration;
+import java.util.Map;
+import java.util.Set;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -120,16 +122,33 @@ public class RedisTaskStream {
         }
         boolean allOk = true;
         for (String key : List.of(streamHigh, streamLow)) {
+            // 1. 先查组是否存在（XINFO GROUPS 命中 = 流与组都在，完全不发 XGROUP CREATE，
+            //    避免对已存在组的重复创建报 BUSYGROUP）
             try {
+                if (groupExists(key)) {
+                    log.debug("Redis Stream 消费者组已存在: stream={} group={}", key, group);
+                    continue;
+                }
+            } catch (Exception e) {
+                // 流不存在（XINFO 报 no such key）等：落到下面的 createGroup（MKSTREAM 建流）
+                log.debug("消费组存在性查询未命中，尝试直接创建: stream={} ({})", key, rootMessage(e));
+            }
+
+            // 2. 创建组；组已存在（并发竞争/上一次创建成功但响应丢失）按成功处理
+            try {
+                ensureStreamKeyExists(key);
                 redisTemplate.opsForStream().createGroup(key, ReadOffset.from("0"), group);
                 log.info("Redis Stream 消费者组已创建: stream={} group={}", key, group);
             } catch (Exception e) {
-                if (String.valueOf(e.getMessage()).contains("BUSYGROUP")) {
-                    log.info("Redis Stream 消费者组已存在: stream={} group={}", key, group);
-                } else {
-                    allOk = false;
-                    healthMonitor.markFailure("ensureGroups(" + key + ")", e);
+                if (isBusyGroup(e)) {
+                    // BUSYGROUP 的细节在异常链里（Spring 6 起 message 不再拼接 cause），
+                    // 必须沿 cause 链找，只看顶层 message 会把"组已存在"误判成失败
+                    log.info("Redis Stream 消费者组已存在（并发创建竞争）: stream={} group={}", key, group);
+                    continue;
                 }
+                allOk = false;
+                log.error("Redis Stream 消费者组创建失败: stream={}", key, e);
+                healthMonitor.markFailure("ensureGroups(" + key + ")", e);
             }
         }
         groupsReady = allOk;
@@ -140,6 +159,57 @@ public class RedisTaskStream {
             log.error("Redis Stream 消费者组尚未就绪，服务以降级模式运行（任务落本地兜底队列），恢复后自动重建");
         }
         return allOk;
+    }
+
+    /** 该流上是否已存在同名消费组（XINFO GROUPS；流不存在时抛异常由调用方处理）。 */
+    private boolean groupExists(String key) {
+        for (org.springframework.data.redis.connection.stream.StreamInfo.XInfoGroup g
+                : redisTemplate.opsForStream().groups(key)) {
+            if (group.equals(g.groupName())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 确保流 key 存在：XGROUP CREATE 的 MKSTREAM 行为依赖客户端版本，
+     * 这里显式兜底——流不存在时先 XADD 一条引导消息建流再 XDEL 删掉
+     * （空流的组语义正常，消费者不会看到引导消息）。
+     */
+    private void ensureStreamKeyExists(String key) {
+        if (Boolean.TRUE.equals(redisTemplate.hasKey(key))) {
+            return;
+        }
+        RecordId bootstrap = redisTemplate.opsForStream().add(key, Map.of(FIELD_PAYLOAD, "{}"));
+        redisTemplate.opsForStream().delete(key, bootstrap);
+        log.info("Redis Stream 已创建: stream={}（引导消息已清理）", key);
+    }
+
+    /** 沿异常 cause 链查找 BUSYGROUP（Spring 6 起 getMessage() 不再拼接 cause 内容）。
+     *  用身份集合防环：异常链可能被人为构造/被框架包装成环，裸 while 会死循环。 */
+    static boolean isBusyGroup(Throwable e) {
+        Set<Throwable> visited = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        while (e != null && visited.add(e)) {
+            if (e.getMessage() != null && e.getMessage().contains("BUSYGROUP")) {
+                return true;
+            }
+            e = e.getCause();
+        }
+        return false;
+    }
+
+    /** 异常链最底层的可读消息（诊断日志用；身份防环）。 */
+    private static String rootMessage(Throwable e) {
+        Set<Throwable> visited = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        Throwable cur = e;
+        while (cur != null && visited.add(cur)) {
+            if (cur.getCause() == null || visited.contains(cur.getCause())) {
+                break;
+            }
+            cur = cur.getCause();
+        }
+        return cur == null ? null : cur.getMessage();
     }
 
     /** 消费组是否已就绪。 */

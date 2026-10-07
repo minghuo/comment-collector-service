@@ -13,6 +13,7 @@ import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
 import com.sysj.collector.model.CommonStatusEnum;
+import com.sysj.collector.core.provider.support.HttpUtilProvider;
 import com.sysj.http.HttpUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -21,6 +22,7 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -45,12 +47,13 @@ import java.util.regex.Pattern;
  * <p>游标翻页：{@code nextUrl} = 最后一条顶层/回复评论 id（自动翻页续采回填 {@code extra.lastId}）。
  */
 @ProviderCapability({ Capability.COMMENT, Capability.SUB_COMMENT, Capability.CURSOR_PAGING, Capability.SYNC_SUPPORTED })
-@ProviderMeta(platform = "vivo_bbs", feature = "comment", name = "vivo社区-本地爬虫")
+@ProviderMeta(platform = "vivo_bbs", feature = "comment", name = "vivo社区-本地爬虫",
+            ratePerSecond = 2.0, maxConcurrency = 4, flowEffect = "THROTTLE_QUEUE", maxQueueWaitMs = 30000)
 @Slf4j
 @Component("vivo_bbs_local")
 public class VivoBbsLocalCrawlerProvider implements CommentProvider {
 
-    private static final HttpUtil httpUtil = new HttpUtil.Builder().directFallbackOnProxyFailure(true).build();
+    private static final HttpUtil httpUtil = HttpUtilProvider.localClient();
 
     private static final int PAGE_SIZE = 20;
 
@@ -72,7 +75,7 @@ public class VivoBbsLocalCrawlerProvider implements CommentProvider {
         }
         String commentId = extra.get("commentId");
         String lastId = extra.get("lastId");
-        int page = Math.max(1, CommonTools.stringToInteger(extra.get("page")));
+        int page = Math.max(1, CommonTools.stringToInteger(StringUtils.defaultIfBlank(extra.get("page"), "1")));
         log.info("[vivo-bbs-local] 采集开始: tid={} commentId={} lastId={}", tid, commentId, lastId);
 
         return StringUtils.isBlank(commentId) ? getComment(tid, lastId, page) : getCommentChild(tid, commentId, lastId, page);
@@ -80,7 +83,8 @@ public class VivoBbsLocalCrawlerProvider implements CommentProvider {
 
     /** 从 extra.mid / fromUrl / targetId 解析帖子 tid。 */
     static String resolveTid(String mid, String fromUrl, String targetId) {
-        for (String candidate : List.of(mid, fromUrl, targetId)) {
+        for (String candidate : java.util.stream.Stream.of(mid, fromUrl, targetId)
+                    .filter(Objects::nonNull).toList()) {
             if (StringUtils.isBlank(candidate)) {
                 continue;
             }
@@ -175,7 +179,7 @@ public class VivoBbsLocalCrawlerProvider implements CommentProvider {
     private static JSONObject buildParams(String tid, String lastId, int page) {
         long timestamp = System.currentTimeMillis();
         JSONObject paramsJson = new JSONObject();
-        paramsJson.put("lastId", StringUtils.isNotBlank(lastId) ? lastId : null);
+        paramsJson.put("lastId", StringUtils.isNotBlank(lastId) ? lastId : "0");
         paramsJson.put("nonce", DigestUtil.md5Hex(timestamp + "" + (int) (10000000 * Math.random()) + "1"));
         paramsJson.put("pageNum", page);
         paramsJson.put("tid", tid);

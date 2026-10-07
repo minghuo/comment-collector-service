@@ -11,6 +11,7 @@ import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
 import com.sysj.collector.model.CommonStatusEnum;
+import com.sysj.collector.core.provider.support.HttpUtilProvider;
 import com.sysj.http.HttpUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -19,6 +20,7 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -39,12 +41,13 @@ import java.util.regex.Pattern;
  * <p>游标翻页：{@code nextUrl} = 下一轮 after 值（自动翻页续采回填 {@code extra.cursor}）。
  */
 @ProviderCapability({ Capability.COMMENT, Capability.SUB_COMMENT, Capability.CURSOR_PAGING, Capability.SYNC_SUPPORTED })
-@ProviderMeta(platform = "xiaomi_bbs", feature = "comment", name = "小米社区-本地爬虫")
+@ProviderMeta(platform = "xiaomi_bbs", feature = "comment", name = "小米社区-本地爬虫",
+            ratePerSecond = 2.0, maxConcurrency = 4, flowEffect = "THROTTLE_QUEUE", maxQueueWaitMs = 30000)
 @Slf4j
 @Component("xiaomi_bbs_local")
 public class XiaomiBbsLocalCrawlerProvider implements CommentProvider {
 
-    private static final HttpUtil httpUtil = new HttpUtil.Builder().directFallbackOnProxyFailure(true).build();
+    private static final HttpUtil httpUtil = HttpUtilProvider.localClient();
 
     private static final String API_BASE =
             "https://api.vip.miui.com/mtop/planet/vip/content/";
@@ -77,7 +80,8 @@ public class XiaomiBbsLocalCrawlerProvider implements CommentProvider {
 
     /** 从 extra.mid / fromUrl / targetId 解析帖子 postId。 */
     static String resolvePostId(String mid, String fromUrl, String targetId) {
-        for (String candidate : List.of(mid, fromUrl, targetId)) {
+        for (String candidate : java.util.stream.Stream.of(mid, fromUrl, targetId)
+                    .filter(Objects::nonNull).toList()) {
             if (StringUtils.isBlank(candidate)) {
                 continue;
             }
