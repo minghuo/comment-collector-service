@@ -12,6 +12,7 @@ import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
 import com.sysj.collector.model.CommonStatusEnum;
+import com.sysj.collector.core.provider.support.ProviderUrls;
 import com.sysj.collector.core.provider.support.HttpUtilProvider;
 import com.sysj.http.HttpUtil;
 import lombok.extern.slf4j.Slf4j;
@@ -83,15 +84,17 @@ public class WeiboLocalCrawlerProvider implements CommentProvider {
         int fetchLevel = replay ? 1 : 0;
         String parentCommentId = replay ? mid : null;
 
+        // 修 R8：sort/mid/uid/maxId 都来自调用方 extra，必须编码后拼 query
+        // （isMix/fetchLevel 是本类算出的 int，无需编码）
         StringBuilder apiUrl = new StringBuilder(API_URL)
-                .append("?flow=").append(sort)
-                .append("&is_reload=1&id=").append(mid)
+                .append("?flow=").append(ProviderUrls.encodeParam(sort))
+                .append("&is_reload=1&id=").append(ProviderUrls.encodeParam(mid))
                 .append("&is_show_bulletin=2&is_mix=").append(isMix)
-                .append("&count=20&uid=").append(uid == null ? "" : uid)
+                .append("&count=20&uid=").append(uid == null ? "" : ProviderUrls.encodeParam(uid))
                 .append("&fetch_level=").append(fetchLevel)
                 .append("&locale=zh-CN");
         if (StringUtils.isNotBlank(maxId)) {
-            apiUrl.append("&max_id=").append(maxId);
+            apiUrl.append("&max_id=").append(ProviderUrls.encodeParam(maxId));
         }
 
         String url = apiUrl.toString();

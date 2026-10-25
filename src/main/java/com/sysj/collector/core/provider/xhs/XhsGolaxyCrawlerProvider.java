@@ -65,16 +65,19 @@ public class XhsGolaxyCrawlerProvider implements CommentProvider {
             return CommonEntity.<Comment>builder().haseMore(false)
                     .status(CommonStatusEnum.STATUS_PARAM).build();
         }
+        // 修 R8：mid/commentId/cursor 来自调用方 extra 或上游游标，必须 URL 编码后再拼 query
         String apiUrl;
         if (StringUtils.isNotBlank(commentId)) {
             apiUrl = String.format("%s/reply/xiaohongshu/v2?apiKey=%s&video_id=%s&comment_id=%s",
-                    GolaxyConstants.COMMENT_BASE_URL, GolaxyConstants.COMMENT_API_KEY, mid, commentId);
+                    GolaxyConstants.COMMENT_BASE_URL, GolaxyConstants.COMMENT_API_KEY,
+                    ProviderUrls.encodeParam(mid), ProviderUrls.encodeParam(commentId));
         } else {
             apiUrl = String.format("%s/xiaohongshu/v2?apiKey=%s&video_id=%s",
-                    GolaxyConstants.COMMENT_BASE_URL, GolaxyConstants.COMMENT_API_KEY, mid);
+                    GolaxyConstants.COMMENT_BASE_URL, GolaxyConstants.COMMENT_API_KEY,
+                    ProviderUrls.encodeParam(mid));
         }
         if (StringUtils.isNotBlank(cursor)) {
-            apiUrl = apiUrl + "&cursor=" + cursor;
+            apiUrl = apiUrl + "&cursor=" + ProviderUrls.encodeParam(cursor);
         }
         return fetch(apiUrl);
     }

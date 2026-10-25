@@ -2,6 +2,9 @@ package com.sysj.collector.core.provider.support;
 
 import org.apache.commons.lang3.StringUtils;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+
 /**
  * 供应商通用的内容 ID 解析工具。
  *
@@ -64,5 +67,26 @@ public final class ProviderUrls {
         int slash = s.lastIndexOf('/');
         String seg = slash >= 0 ? s.substring(slash + 1) : s;
         return StringUtils.isBlank(seg) ? null : seg;
+    }
+
+    /**
+     * 把查询参数值编码后拼进 URL（{@code application/x-www-form-urlencoded} 语义）。
+     *
+     * <p><b>修 R8：为什么所有 query 参数值都必须过这里</b>。这些值来自调用方
+     * （{@code extra.mid}/{@code commentId}/{@code cursor}/{@code buffer}/{@code videoId}）
+     * 或上游返回的游标，直接字符串拼接时：
+     * <ul>
+     *   <li>值里的 {@code &} 会被当成参数分隔符 —— 攻击者可借 {@code mid} 追加
+     *       {@code &apiKey=...} 之类的参数（参数注入/凭据覆盖）；</li>
+     *   <li>值里的 {@code #} 会把后面全部内容变成 fragment，请求打到别的路径/丢参数；</li>
+     *   <li>值里的空格、中文、{@code %}会让请求行不合法，被上游 400。</li>
+     * </ul>
+     *
+     * <p>已有先例：{@code WechatCommentCrawlerProvider} 对 {@code url} 参数用了
+     * {@code URLCodeUtil.getURLEncode}，但对同一 URL 里的 {@code buffer}/{@code comment_id}
+     * 没做 —— 同一处一半编码一半不编码，等于没编码。
+     */
+    public static String encodeParam(String value) {
+        return value == null ? "" : URLEncoder.encode(value, StandardCharsets.UTF_8);
     }
 }

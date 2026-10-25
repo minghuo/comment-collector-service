@@ -218,15 +218,58 @@ public class RedisTaskStream {
     }
 
     /**
-     * 周期性重试消费组创建：Redis 故障期间启动/重启的实例，探活恢复后在此补建消费组
-     * （与本进程内的探活任务同周期，幂等）。
+     * 周期性校验消费组：既补建"尚未就绪"的组，也回验"已就绪"的组是否仍在。
+     *
+     * <p>回验是必须的：{@code groupsReady} 是**进程内**标志，Redis 侧被 {@code FLUSHALL}、
+     * 切库、运维删 key 之后标志仍为 true；旧实现只在 {@code !groupsReady} 时补建，
+     * 于是消费组永不重建、{@code XREADGROUP} 一直报 NOGROUP、消费静默停摆
+     * （消费者还在跑，任务只堆在流里）。
      */
     @org.springframework.scheduling.annotation.Scheduled(
             fixedDelayString = "${collector.queue.redis-probe-ms:10000}")
     public void reEnsureGroups() {
-        if (!groupsReady && healthMonitor.isAvailable()) {
-            ensureGroups();
+        if (!healthMonitor.isAvailable()) {
+            return;
         }
+        if (!groupsReady) {
+            ensureGroups();
+            return;
+        }
+        if (!groupsStillExist()) {
+            markGroupsLost("探活回验：消费组在 Redis 侧已消失");
+        }
+    }
+
+    /** 两条流上的同名消费组是否都还在（任一缺失或查询异常即视为丢失）。 */
+    private boolean groupsStillExist() {
+        for (String key : List.of(streamHigh, streamLow)) {
+            try {
+                if (!groupExists(key)) {
+                    log.warn("消费组回验缺失: stream={} group={}", key, group);
+                    return false;
+                }
+            } catch (Exception e) {
+                // 流不存在（被 DEL）也会抛：同样视为丢失，由 ensureGroups 用 MKSTREAM 重建
+                log.warn("消费组回验失败（按丢失处理）: stream={} group={} ({})", key, group, rootMessage(e));
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 标记消费组丢失，交由探活周期重建（≤ 一个探活周期）。
+     *
+     * <p>消费者读到 NOGROUP 时也会调用本方法：那说明组已经不在，不能继续
+     * 相信进程内标志。重建前消息只堆在流里（XADD 不依赖消费组），
+     * 组用 {@code ReadOffset.from("0")} 创建，重建后仍会被消费，不丢任务。
+     */
+    public void markGroupsLost(String reason) {
+        if (groupsReady) {
+            log.warn("Redis Stream 消费组丢失，将自动重建: reason={} group={} high={} low={}",
+                    reason, group, streamHigh, streamLow);
+        }
+        groupsReady = false;
     }
 
     // ── 生产 ───────────────────────────────────────────────────────────────

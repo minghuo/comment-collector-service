@@ -49,6 +49,13 @@
  *                      经验值 ≈ rate_per_second × 预期响应秒数，再留一倍余量
  *   timeout_ms      —— **单次调用**超时（§9.5，借鉴 B-03），不是整条重试链；
  *                      整链预算 = timeout_ms × (max_retry + 1) + 退避总和
+ *   target_concurrency / start_delay_ms / max_delay_ms —— 自适应限速标定（§8.2），缺省 1.0 / 500 / 60000。
+ *                      本文件对 6 个本地爬虫 comment provider（vivo/huawei/tieba/oppo/xiaomi/honor）显式取
+ *                      `target_concurrency: 3` + `max_delay_ms: 5000`：典型响应 600~700ms 时目标延迟低于下限 500
+ *                      ⇒ 常态仍跑静态上限，只有真正的慢调用才降速，且最坏速率被锁在 0.2/s 以上
+ *                      （2026-10-11 实测标定，见设计文档 §8.2 修订 5；honor 未进实测批次，按同类取值对齐）
+ *   flow_effect / max_queue_wait_ms —— Bulkhead 取许可语义（§8.1）：`THROTTLE_QUEUE` 有界排队，
+ *                      实际等待被 `collector.pipeline.bulkhead-max-queue-wait-ms`（默认 5000）封顶
  */
 const FEATURE_CONFIGS = [
   {
@@ -124,7 +131,7 @@ const FEATURE_CONFIGS = [
     feature_name: '百度贴吧评论采集',
     providers: [
       // 贴吧官方接口，无登录 cookie 可用；主列表 15 楼/页，楼中楼 30 条/页
-      { provider_key: 'tieba_local', name: '百度贴吧-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
+      { provider_key: 'tieba_local', name: '百度贴吧-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, target_concurrency: 3, max_delay_ms: 5000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -133,7 +140,7 @@ const FEATURE_CONFIGS = [
     feature_name: '荣耀社区评论采集',
     providers: [
       // Discuz 页面直出 HTML + XPath 解析；回复全部内嵌页面，无子回复接口（不声明 SUB_COMMENT）
-      { provider_key: 'honor_bbs_local', name: '荣耀社区-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
+      { provider_key: 'honor_bbs_local', name: '荣耀社区-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, target_concurrency: 3, max_delay_ms: 5000, capabilities: ['COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -142,7 +149,7 @@ const FEATURE_CONFIGS = [
     feature_name: '华为社区评论采集',
     providers: [
       // vmall 俱乐部 SGW 网关接口（SGW-APP-ID 内置于实现）；页码分页
-      { provider_key: 'huawei_bbs_local', name: '华为社区-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
+      { provider_key: 'huawei_bbs_local', name: '华为社区-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, target_concurrency: 3, max_delay_ms: 5000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -151,7 +158,7 @@ const FEATURE_CONFIGS = [
     feature_name: 'OPPO社区评论采集',
     providers: [
       // www.oppo.cn 官方 UGC 接口（GET JSON，无需签名）；页码分页
-      { provider_key: 'oppo_bbs_local', name: 'OPPO社区-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
+      { provider_key: 'oppo_bbs_local', name: 'OPPO社区-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, target_concurrency: 3, max_delay_ms: 5000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -160,7 +167,7 @@ const FEATURE_CONFIGS = [
     feature_name: 'vivo社区评论采集',
     providers: [
       // bbs.vivo.com.cn 官方接口（nonce 签名内置于实现）；lastId 键集翻页
-      { provider_key: 'vivo_bbs_local', name: 'vivo社区-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
+      { provider_key: 'vivo_bbs_local', name: 'vivo社区-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, target_concurrency: 3, max_delay_ms: 5000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -169,7 +176,7 @@ const FEATURE_CONFIGS = [
     feature_name: '小米社区评论采集',
     providers: [
       // api.vip.miui.com 官方接口（GET，无需签名）；after 游标（主列表=偏移量，回复=末条回复 id）
-      { provider_key: 'xiaomi_bbs_local', name: '小米社区-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
+      { provider_key: 'xiaomi_bbs_local', name: '小米社区-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, target_concurrency: 3, max_delay_ms: 5000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
     ],
   },
 ];
@@ -399,6 +406,10 @@ await db.supplier_state.createIndex({ supplier_key: 1 }, { unique: true, name: '
 
 await db.master_task.createIndex({ status: 1, create_time: 1 }, { name: 'idx_status_create_time' });
 await db.master_task.createIndex({ user_id: 1, create_time: -1 }, { name: 'idx_user_create_time' });
+// 派发批次查询索引（修 W-11）：MasterTaskDao.findByDispatchId 按 dispatch_id 过滤、
+// create_time 升序；实体上的 @Indexed 因 spring.data.mongodb.auto-index-creation=false 不生效，
+// 缺这条索引时 GET /api/dispatch/{dispatchId} 每次都是 COLLSCAN。
+await db.master_task.createIndex({ dispatch_id: 1, create_time: 1 }, { name: 'idx_dispatch_create_time' });
 // 提交幂等键唯一索引（阶段1 幂等改造）：partial 过滤表达式只约束 string 类型的键，
 // 未传幂等键的任务（无该字段 / null）不受唯一性约束。
 // 前置条件：TaskManagementService 已支持并发同 key 时捕获 DuplicateKeyException 并回查返回。
@@ -412,19 +423,29 @@ await db.master_task.createIndex(
 
 await db.sub_task.createIndex({ master_task_id: 1, status: 1 }, { name: 'idx_master_status' });
 await db.sub_task.createIndex({ status: 1, create_time: 1 }, { name: 'idx_status_create_time' });
-// (master_task_id, link) 唯一索引（阶段1 幂等改造）：同一主任务下链接只允许一个子任务。
-// 建任务入口已先去重（TaskManagementService.doCreateMasterTask 用 LinkedHashSet 去重后再拆分），
+// (master_task_id, link, page_count) 唯一索引。
+//
+// 修 R4：键里必须带上翻页深度 page_count。同一主任务下"同一链接"会**合法地**存在多条子任务 ——
+// 自动翻页续采子任务刻意复用父链接（TaskManagementService.createContinuationIfNeeded 里的
+// continuation.setLink(parent.getLink())），只有 page_count 递增（1 = 首次提交，2+ = 续采第 N-1 轮）。
+// 旧索引只到 (master_task_id, link)，于是**第一条续采子任务必然撞唯一键**：
+// DuplicateKeyException 落在 markTerminalIfFirst 与 recordOutcomeAndFinish 之间，
+// 把主任务的收敛计数永久吃掉（成功+失败 永远小于 total_links ⇒ 主任务不收敛、回调不触发）。
+// 带上 page_count 后语义反而更准：同一链接的每个翻页深度只允许一条子任务，
+// "同一页被处理两次"依然被索引挡住。建任务入口已先去重
+//（TaskManagementService.doCreateMasterTask 用 LinkedHashSet 去重后再拆分），
 // 因此正常路径不会触发唯一冲突，索引是并发/数据修复场景的兜底。
-// 存量库若已有重复数据需先去重，否则建索引失败：
-//   db.sub_task.aggregate([{$group:{_id:{m:'$master_task_id',l:'$link'},n:{$sum:1},ids:{$push:'$_id'}}},{$match:{n:{$gt:1}}}])
-//   —— 每组保留 createTime 最早的一条，其余删除后再执行本脚本。
-try {
-  await db.sub_task.dropIndex('idx_master_link');
-  await db.sub_task.dropIndex('idx_master_link_unique');
-} catch (e) { /* 首次执行不存在，正常 */ }
+//
+// 迁移安全性：旧索引是 (master_task_id, link) 唯一 —— 它已保证同一 (master_task_id, link)
+// 下只可能有一条文档，而新索引的键是它的超集，因此新索引不可能因存量数据而建不起来。
+for (const staleIndex of ['idx_master_link_page_unique', 'idx_master_link_unique', 'idx_master_link']) {
+  try {
+    await db.sub_task.dropIndex(staleIndex);
+  } catch (e) { /* 首次执行不存在，正常 */ }
+}
 await db.sub_task.createIndex(
-  { master_task_id: 1, link: 1 },
-  { unique: true, name: 'idx_master_link_unique' }
+  { master_task_id: 1, link: 1, page_count: 1 },
+  { unique: true, name: 'idx_master_link_page_unique' }
 );
 // 子任务重投扫描的部分索引（阶段1 重试闭环）：只索引 RETRYING 文档，
 // SubTaskDao.findDueRetries 的扫描开销与待重投规模成正比
@@ -464,6 +485,10 @@ const SYSTEM_CONFIG_SEEDS = [
   { _id: 'collector.circuit.minimum-calls', value: '5', description: '触发评估的最小调用数' },
   { _id: 'collector.circuit.open-seconds', value: '60', description: '熔断冷却时长（秒），结束后进入半开' },
   { _id: 'collector.circuit.half-open-calls', value: '3', description: '半开探测名额（全成功才恢复）' },
+  // 驱逐 / panic 守卫（借鉴 Envoy outlier_detection）：两个缺省值即"不限制 / 关闭"，
+  // 因此对既有熔断语义零影响，由运维按平台候选规模显式收紧/开启
+  { _id: 'collector.circuit.max-ejection-percent', value: '100', description: '驱逐比例上限（%）：再驱逐一个就超限时不驱逐；100=不限制' },
+  { _id: 'collector.circuit.panic-threshold-percent', value: '0', description: 'panic 阈值（%）：可用候选占比低于它则放行一个最不坏候选；0=关闭' },
   // 自适应限速
   { _id: 'collector.ratelimit.adaptive-enabled', value: 'true', description: '自适应限速总开关' },
   { _id: 'collector.ratelimit.reject-timeout-ms', value: '500', description: 'REJECT/WARM_UP 取令牌最长等待（毫秒）' },

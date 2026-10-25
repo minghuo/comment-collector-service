@@ -55,8 +55,12 @@ public final class AdaptiveDelayPolicy {
         long current = currentDelayMs <= 0 ? p.startDelayMs() : currentDelayMs;
 
         if (latencyMs <= 0) {
-            // 耗时未知：只能依据成败调整，不做平滑
-            return clamp(success ? current : Math.max(current, current), p);
+            // 耗时未知：只能依据成败调整，不做平滑。
+            // 成功 → 保持不变；失败 → 必须**增大**（翻倍，受 max_delay 约束）。
+            // 这里曾经写成 Math.max(current, current)（恒等式），等于失败也不降速：
+            // 亚毫秒级的快速失败会算出 latencyMs=0，速率就永远顶在上限，
+            // 与类注释里"失败只降不升"的约定直接矛盾。
+            return clamp(success ? current : current * 2L, p);
         }
 
         long target = (long) (latencyMs / p.targetConcurrency());

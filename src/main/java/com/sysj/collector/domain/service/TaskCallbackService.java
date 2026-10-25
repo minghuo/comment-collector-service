@@ -24,8 +24,12 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 主任务完成回调：主任务进入终态（COMPLETED / FAILED）后向 {@code master_task.callbackUrl}
- * POST 结果摘要。此前 {@code callbackUrl} 只落库从不消费（死字段）。
+ * 主任务完成回调：主任务进入终态（COMPLETED / PARTIAL / FAILED，2026-10-11 起含 PARTIAL，
+ * 见 {@link com.sysj.collector.domain.document.TaskStatuses#masterTerminalStatusOf}）后向
+ * {@code master_task.callbackUrl} POST 结果摘要。此前 {@code callbackUrl} 只落库从不消费（死字段）。
+ *
+ * <p>注意 {@code status=PARTIAL} 表示"部分子任务成功、部分失败"：调用方应结合
+ * {@code successLinks/failedLinks} 判断是否需要补采，不能只看 {@code status != FAILED}。
  *
  * <h3>投递语义</h3>
  * <ul>

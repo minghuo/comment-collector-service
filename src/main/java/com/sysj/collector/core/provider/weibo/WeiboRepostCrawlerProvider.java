@@ -13,6 +13,7 @@ import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
 import com.sysj.collector.model.CommonStatusEnum;
+import com.sysj.collector.core.provider.support.ProviderUrls;
 import com.sysj.collector.core.provider.support.HttpUtilProvider;
 import com.sysj.http.HttpUtil;
 import lombok.extern.slf4j.Slf4j;
@@ -72,7 +73,8 @@ public class WeiboRepostCrawlerProvider implements CommentProvider {
         }
         log.info("[weibo-repost] 转发采集: mid={} page={} nextId={}", mid, page, nextId);
 
-        String url = API_URL + "?id=" + mid + "&page=" + page + "&moduleID=feed&count=20";
+        // 修 R8：mid 来自调用方 extra，必须编码后拼 query（page 是 int）
+        String url = API_URL + "?id=" + ProviderUrls.encodeParam(mid) + "&page=" + page + "&moduleID=feed&count=20";
         Map<String, String> headers = ProviderHeaders.weiboHeaders(cookie);
 
         List<Comment> reposts = new ArrayList<>();

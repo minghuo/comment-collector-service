@@ -14,6 +14,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.ErrorResponse;
 import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import java.time.Instant;
@@ -34,6 +35,16 @@ import java.util.Map;
 @Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+    /**
+     * 500 响应是否回显异常原文（修 R5）。
+     *
+     * <p>缺省 {@code false}：异常 message 可能带出驱动名、集合名、内部类名等实现细节，
+     * 只应进服务端日志；响应改回一个短 {@code traceId}，排障时凭它关联日志。
+     * 排障实在不便时才临时置 true。
+     */
+    @Value("${collector.api.expose-error-detail:false}")
+    private boolean exposeErrorDetail;
 
     /** 过载：异步队列名额不足 → 503，让调用方稍后重试而不是无限堆积。 */
     @ExceptionHandler(QueueFullException.class)
@@ -99,10 +110,16 @@ public class GlobalExceptionHandler {
             return ResponseEntity.status(er.getStatusCode())
                     .body(body("REQUEST_ERROR", e.getMessage(), null));
         }
-        // 真正的服务端错误：必须留日志，否则线上 500 无从排查
-        log.error("未处理异常: type={} message={}", e.getClass().getName(), e.getMessage(), e);
+        // 真正的服务端错误：必须留日志，否则线上 500 无从排查。
+        // 修 R5：不再把 e.getMessage() 回显给调用方（可能含驱动/集合/内部类名等实现细节），
+        // 改为回一个短 traceId，异常详情只进服务端日志，排障时凭 traceId 关联。
+        String traceId = Long.toHexString(System.nanoTime());
+        log.error("未处理异常: traceId={} type={} message={}", traceId, e.getClass().getName(), e.getMessage(), e);
+        String message = exposeErrorDetail
+                ? "内部错误: " + e.getMessage()
+                : "服务内部错误，请凭 traceId 查服务端日志";
         return ResponseEntity.internalServerError()
-                .body(body("INTERNAL_ERROR", "内部错误: " + e.getMessage(), null));
+                .body(body("INTERNAL_ERROR", message, Map.of("traceId", traceId)));
     }
 
     /**

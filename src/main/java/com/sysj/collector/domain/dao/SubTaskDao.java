@@ -1,6 +1,7 @@
 package com.sysj.collector.domain.dao;
 
 import com.sysj.collector.domain.document.SubTask;
+import com.sysj.collector.domain.document.TaskStatuses;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Sort;
@@ -109,7 +110,7 @@ public class SubTaskDao {
     public boolean markTerminalIfFirst(String subTaskId, String terminalStatus,
                                        String providerKey, String resultJson, String errorMessage) {
         Query query = new Query(Criteria.where("id").is(subTaskId)
-                .and("status").nin(List.of("SUCCESS", "FAILED")));
+                .and("status").in(TaskStatuses.SUB_NON_TERMINAL));
         Update update = new Update()
                 .set("status", terminalStatus)
                 .set("errorMessage", errorMessage)
@@ -121,6 +122,108 @@ public class SubTaskDao {
         if (resultJson != null) {
             update.set("result", resultJson);
         }
+        return mongoTemplate.updateFirst(query, update, SubTask.class).getModifiedCount() == 1;
+    }
+
+    /**
+     * 条件写入 RETRYING（失败重投）：仅当子任务仍处于非终态白名单时写入。
+     *
+     * <p>此前 {@code TaskManagementService.scheduleRetry} 直接整文档 {@code save}，
+     * 会把已被并发路径写成 SUCCESS/FAILED 的子任务复活成 RETRYING（重复采集、主任务计数错乱）。
+     *
+     * @return true = 本次写入生效；false = 已是终态（放弃重投）
+     */
+    public boolean markRetryingIfNotTerminal(String subTaskId, int retryCount, String errorMessage,
+                                             Instant nextExecuteTime) {
+        Query query = new Query(Criteria.where("id").is(subTaskId)
+                .and("status").in(TaskStatuses.SUB_NON_TERMINAL));
+        Update update = new Update()
+                .set("status", TaskStatuses.SUB_RETRYING)
+                .set("retryCount", retryCount)
+                .set("errorMessage", errorMessage)
+                .set("nextExecuteTime", nextExecuteTime)
+                .set("completeTime", null)
+                .set("updateTime", Instant.now());
+        return mongoTemplate.updateFirst(query, update, SubTask.class).getModifiedCount() == 1;
+    }
+
+    /**
+     * 条件领取一次重投：仅当子任务仍是 RETRYING（到期扫描读到的那个状态）时置为 RUNNING。
+     *
+     * <p>多实例部署下 {@code SubTaskRetryScheduler} 会在每个实例上同时扫到同一批到期子任务；
+     * 该条件更新即"抢占"——只有 {@code modifiedCount == 1} 的实例可以入队，
+     * 其余实例静默跳过（无需分布式锁，见审计项：定时任务无分布式锁）。
+     *
+     * @return true = 本次实例领取成功；false = 已被其它实例领取或已终态
+     */
+    public boolean markRunningIfRetrying(String subTaskId) {
+        Query query = new Query(Criteria.where("id").is(subTaskId)
+                .and("status").is(TaskStatuses.SUB_RETRYING));
+        Update update = new Update()
+                .set("status", TaskStatuses.SUB_RUNNING)
+                .set("startTime", Instant.now())
+                .set("updateTime", Instant.now());
+        return mongoTemplate.updateFirst(query, update, SubTask.class).getModifiedCount() == 1;
+    }
+
+    /**
+     * 队列满时把已领取（RUNNING）的重投任务推回 RETRYING，等下次扫描。
+     *
+     * @return true = 本次写回生效
+     */
+    public boolean markRetryingFromRunning(String subTaskId, Instant nextExecuteTime) {
+        Query query = new Query(Criteria.where("id").is(subTaskId)
+                .and("status").is(TaskStatuses.SUB_RUNNING));
+        Update update = new Update()
+                .set("status", TaskStatuses.SUB_RETRYING)
+                .set("nextExecuteTime", nextExecuteTime)
+                .set("updateTime", Instant.now());
+        return mongoTemplate.updateFirst(query, update, SubTask.class).getModifiedCount() == 1;
+    }
+
+    /**
+     * 条件领取一次"首次投递"：仅当子任务仍是 PENDING 时置为 RUNNING。
+     *
+     * <p>此前 {@code TaskManagementService.submitSubTask} 是"整文档 save 成 RUNNING 再入队"，
+     * 在<b>多实例</b>下没有抢占语义：两个实例同时投递同一子任务会双双执行、主任务计数翻倍
+     * （与重投路径已有的 {@link #markRunningIfRetrying} 不对称）。改为条件更新后，
+     * 只有 {@code modifiedCount == 1} 的实例可以入队。
+     *
+     * @return true = 本次实例领取成功；false = 已被其它实例领取或已不是 PENDING
+     */
+    public boolean markRunningIfPending(String subTaskId) {
+        Query query = new Query(Criteria.where("id").is(subTaskId)
+                .and("status").is(TaskStatuses.SUB_PENDING));
+        Update update = new Update()
+                .set("status", TaskStatuses.SUB_RUNNING)
+                .set("startTime", Instant.now())
+                .set("updateTime", Instant.now());
+        return mongoTemplate.updateFirst(query, update, SubTask.class).getModifiedCount() == 1;
+    }
+
+    /**
+     * 条件领取一次"陈旧 RUNNING 子任务"（启动恢复路径）：仅当子任务仍为 RUNNING 且
+     * {@code update_time < staleBefore} 时重新领取（刷新 startTime/updateTime、重置重试计数）。
+     *
+     * <p>为什么需要它：{@code TaskRecoveryService} 在启动时把 ACTIVE/PENDING 主任务下
+     * PENDING/RUNNING 的子任务重新入队 —— 但"RUNNING"只说明**某个**实例正在跑，
+     * 也完全可能是上一个实例崩溃留下的墓碑（子任务卡在 RUNNING 永不推进）。
+     * 用"更新时刻足够旧"作为存活性判据：真的还在跑的实例会持续刷新 updateTime，
+     * 于是条件不成立、不会造成重复投递；墓碑则被安全接管。
+     *
+     * @param staleBefore 早于该时刻仍无更新的 RUNNING 视为陈旧
+     * @return true = 本次实例接管成功；false = 仍在被其它实例推进或已终态
+     */
+    public boolean markRunningIfStale(String subTaskId, Instant staleBefore) {
+        Query query = new Query(Criteria.where("id").is(subTaskId)
+                .and("status").is(TaskStatuses.SUB_RUNNING)
+                .and("updateTime").lt(staleBefore));
+        Update update = new Update()
+                .set("status", TaskStatuses.SUB_RUNNING)
+                .set("startTime", Instant.now())
+                .set("updateTime", Instant.now())
+                .set("retryCount", 0)
+                .set("nextExecuteTime", null);
         return mongoTemplate.updateFirst(query, update, SubTask.class).getModifiedCount() == 1;
     }
 

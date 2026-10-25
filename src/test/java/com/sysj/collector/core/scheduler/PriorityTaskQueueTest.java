@@ -2,15 +2,14 @@ package com.sysj.collector.core.scheduler;
 
 import org.junit.jupiter.api.Test;
 
-import java.util.concurrent.atomic.AtomicLong;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * {@link PriorityTaskQueue} 单元测试：有界容量、原子预留/归还、出队时按当前有效优先级现算。
+ * {@link PriorityTaskQueue} 单元测试：有界容量、原子预留/归还、出队时按当前有效优先级现算、
+ * 阻塞出队唤醒。2026-10-11 起两个信号量均为公平模式，已删除无调用方的 {@code pollIf}。
  */
 class PriorityTaskQueueTest {
 
@@ -98,23 +97,35 @@ class PriorityTaskQueueTest {
     }
 
     @Test
-    void pollIfSkipsNonMatchingTasks() {
-        PriorityTaskQueue<Task> queue = new PriorityTaskQueue<>(0);
-        Task high = new Task("high", 10, queue.nextSeq());
-        Task low = new Task("low", 900, queue.nextSeq());
-        queue.offerReserved(high);
-        queue.offerReserved(low);
-
-        // 公平配额的"捞一个低优先级任务"
-        Task picked = queue.pollIf(t -> t.effectivePriority() >= 500);
-        assertSameTask(low, picked);
-        assertEquals(1, queue.size());
-        // 容量许可应随取走任务归还（有界队列"只出不进"回归）
+    void pollReleasesCapacityPermit() {
+        // 有界队列"只出不进"回归：取走任务后容量许可必须归还
         PriorityTaskQueue<Task> bounded = new PriorityTaskQueue<>(1);
         assertTrue(bounded.tryReserve(1));
         bounded.offerReserved(new Task("x", 1, bounded.nextSeq()));
-        bounded.poll();
+        assertEquals(0, bounded.remainingCapacity());
+        assertSameTask(bounded.snapshot().get(0), bounded.poll());
         assertTrue(bounded.tryReserve(1), "取走任务后容量许可应已归还");
+    }
+
+    @Test
+    void takeBlocksUntilOfferThenReturnsTask() throws Exception {
+        PriorityTaskQueue<Task> queue = new PriorityTaskQueue<>(0);
+        Task expected = new Task("only", 10, queue.nextSeq());
+
+        Thread consumer = new Thread(() -> {
+            try {
+                Task taken = queue.take();
+                assertEquals(expected.name, taken == null ? null : taken.name);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        consumer.start();
+        Thread.sleep(50);
+        queue.offerReserved(expected);
+        consumer.join(2000);
+        assertFalse(consumer.isAlive(), "take() 应在 offer 后被唤醒返回");
+        assertTrue(queue.isEmpty());
     }
 
     private static void assertSameTask(Task expected, Task actual) {

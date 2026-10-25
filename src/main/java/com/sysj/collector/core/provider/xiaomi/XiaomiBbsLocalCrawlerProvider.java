@@ -11,6 +11,7 @@ import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
 import com.sysj.collector.model.CommonStatusEnum;
+import com.sysj.collector.core.provider.support.ProviderUrls;
 import com.sysj.collector.core.provider.support.HttpUtilProvider;
 import com.sysj.http.HttpUtil;
 import lombok.extern.slf4j.Slf4j;
@@ -162,13 +163,16 @@ public class XiaomiBbsLocalCrawlerProvider implements CommentProvider {
     }
 
     private static String commentsUrl(String postId, int after) {
+        // 修 R8：postId 来自调用方/上游，必须编码后拼 query（after 是 int）
         return API_BASE + "comments?ref=&pathname=%2Fmio%2Fdetail&version=dev.230112&postId="
-                + postId + "&after=" + after + "&limit=" + PAGE_SIZE + "&sortType=2";
+                + ProviderUrls.encodeParam(postId) + "&after=" + after + "&limit=" + PAGE_SIZE + "&sortType=2";
     }
 
     private static String replyUrl(String postId, String commentId, String after) {
+        // 修 R8：postId/commentId/after 都来自调用方 extra 或上游游标，必须编码后拼 query
         return API_BASE + "commentReply?ref=&pathname=%2Fmio%2Fdetail&version=dev.230112&after="
-                + after + "&postId=" + postId + "&commentId=" + commentId + "&limit=" + PAGE_SIZE + "&isFirstReq=1";
+                + ProviderUrls.encodeParam(after) + "&postId=" + ProviderUrls.encodeParam(postId)
+                + "&commentId=" + ProviderUrls.encodeParam(commentId) + "&limit=" + PAGE_SIZE + "&isFirstReq=1";
     }
 
     private static int parseCursor(String cursor) {

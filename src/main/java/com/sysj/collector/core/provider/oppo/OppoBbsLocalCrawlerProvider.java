@@ -11,6 +11,7 @@ import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
 import com.sysj.collector.model.CommonStatusEnum;
+import com.sysj.collector.core.provider.support.ProviderUrls;
 import com.sysj.collector.core.provider.support.HttpUtilProvider;
 import com.sysj.http.HttpUtil;
 import lombok.extern.slf4j.Slf4j;
@@ -159,7 +160,10 @@ public class OppoBbsLocalCrawlerProvider implements CommentProvider {
     }
 
     private static String pageUrl(String path, String idKey, String idValue, int page) {
-        return API_BASE + path + "?" + idKey + "=" + idValue + "&limit=" + PAGE_SIZE + "&page=" + page;
+        // 修 R8：idKey 是本类写死的字面量（pid/tid），idValue 来自调用方/上游（帖子 tid、父评论 pid），
+        // 必须编码后再拼 query，否则值里的 '&' 可注入额外参数
+        return API_BASE + path + "?" + idKey + "=" + ProviderUrls.encodeParam(idValue)
+                + "&limit=" + PAGE_SIZE + "&page=" + page;
     }
 
     private static Map<String, String> requestHeaders() {

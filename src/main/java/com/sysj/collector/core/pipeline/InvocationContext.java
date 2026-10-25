@@ -48,14 +48,19 @@ public record InvocationContext(
      * 整条重试链的墙钟预算（毫秒）—— 设计文档 §9.5 的公式：
      * {@code 单次调用超时 × (max_retry + 1) + 退避总和}。
      *
-     * <p>退避总和与 {@link RetryStage} 的退避实现保持同一份公式（500ms × 2^(n-1)），
-     * 因此这里只算一次：{@code 500 × (2^maxRetry - 1)}。
+     * <p>退避总和必须与 {@link RetryStage} 实际使用的退避实现**同一份公式、同一个基数**，
+     * 因此基数由调用方传入（{@code collector.pipeline.retry-backoff-base-ms}，system_config 可覆盖）：
+     * 早先这里硬编码 500ms，一旦把基数调大，预算就小于真实退避总和，
+     * 重试会被提前以 {@code ProviderTimeoutException.totalBudget} 打断（C-12 式"两处实现"的又一例）。
+     *
+     * @param backoffBaseMs 退避基数（毫秒）；{@code <=0} 时按 500 兜底
      */
-    public long totalBudgetMs() {
+    public long totalBudgetMs(long backoffBaseMs) {
         if (timeoutMs <= 0) {
             return 0L;
         }
-        long backoff = 500L * ((1L << Math.min(maxRetry, 20)) - 1L);
+        long base = backoffBaseMs > 0 ? backoffBaseMs : 500L;
+        long backoff = base * ((1L << Math.min(maxRetry, 20)) - 1L);
         return timeoutMs * (maxRetry + 1L) + backoff;
     }
 }

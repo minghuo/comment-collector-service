@@ -69,7 +69,9 @@ public class WechatVideoCommentCrawlerProvider implements CommentProvider {
         }
         log.info("[wechat-video-sy] 视频评论采集: videoId={} commentId={} buffer={}", videoId, commentId, buffer);
 
-        String base = SyConstants.BASE_URL + COMMENT_URL + "?video_id=" + videoId;
+        // 修 R8：video_id/comment_id 来自调用方 extra，必须 URL 编码后再拼 query
+        // （last_buffer 原本就已编码，保持同一个编码器）
+        String base = SyConstants.BASE_URL + COMMENT_URL + "?video_id=" + URLCodeUtil.getURLEncode(videoId);
         for (int i = 0; i < RETRY; i++) {
             try {
                 String apiUrl = base;
@@ -77,7 +79,7 @@ public class WechatVideoCommentCrawlerProvider implements CommentProvider {
                     apiUrl += "&last_buffer=" + URLCodeUtil.getURLEncode(buffer);
                 }
                 if (StringUtils.isNotBlank(commentId)) {
-                    apiUrl += "&comment_id=" + commentId;
+                    apiUrl += "&comment_id=" + URLCodeUtil.getURLEncode(commentId);
                 }
                 String body = httpUtil.getString(apiUrl, ProviderHeaders.syHeaders(), false);
                 Integer code = CommonTools.stringToInteger(CommonParser.getJsonPathOne(body, "$.code"));

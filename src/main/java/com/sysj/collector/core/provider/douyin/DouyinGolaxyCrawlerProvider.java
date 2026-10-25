@@ -65,13 +65,16 @@ public class DouyinGolaxyCrawlerProvider implements CommentProvider {
             return CommonEntity.<Comment>builder().haseMore(false)
                     .status(CommonStatusEnum.STATUS_PARAM).build();
         }
+        // 修 R8：mid/commentId 来自调用方 extra，必须 URL 编码后再拼 query（page 是 int，无需编码）
         String apiUrl;
         if (StringUtils.isNotBlank(commentId)) {
             apiUrl = String.format("%s/reply/douyin?apiKey=%s&video_id=%s&comment_id=%s&page=%s",
-                    GolaxyConstants.COMMENT_BASE_URL, GolaxyConstants.COMMENT_API_KEY, mid, commentId, page);
+                    GolaxyConstants.COMMENT_BASE_URL, GolaxyConstants.COMMENT_API_KEY,
+                    ProviderUrls.encodeParam(mid), ProviderUrls.encodeParam(commentId), page);
         } else {
             apiUrl = String.format("%s/douyin?apiKey=%s&video_id=%s&page=%s",
-                    GolaxyConstants.COMMENT_BASE_URL, GolaxyConstants.COMMENT_API_KEY, mid, page);
+                    GolaxyConstants.COMMENT_BASE_URL, GolaxyConstants.COMMENT_API_KEY,
+                    ProviderUrls.encodeParam(mid), page);
         }
         return fetch(apiUrl, page);
     }

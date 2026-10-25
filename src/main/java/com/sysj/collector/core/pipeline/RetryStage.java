@@ -72,7 +72,8 @@ public class RetryStage implements ProviderInvocationStage {
             return next.get();
         }
 
-        long budget = ctx.totalBudgetMs();
+        // 预算与下面的退避用同一个基数（见 InvocationContext#totalBudgetMs 的说明）
+        long budget = ctx.totalBudgetMs(backoffBaseMs());
         long deadline = budget <= 0 ? Long.MAX_VALUE : System.currentTimeMillis() + budget;
         RuntimeException last = null;
 

@@ -7,17 +7,24 @@ import com.sysj.collector.domain.service.TaskManagementService;
 import com.sysj.collector.domain.document.CommentDoc;
 import com.sysj.collector.domain.document.MasterTask;
 import com.sysj.collector.domain.document.SubTask;
+import com.sysj.collector.domain.document.TaskStatuses;
 import com.sysj.collector.domain.dao.CommentDao;
 import com.sysj.collector.domain.dao.SubTaskDao;
 import com.sysj.collector.domain.dao.MasterTaskDao;
+import com.sysj.collector.config.ApiKeyAuthenticator;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -25,6 +32,10 @@ import java.util.stream.Collectors;
  * 评论采集控制器。
  *
  * <p>提供同步采集、异步采集、任务查询等接口。
+ *
+ * <p><b>修 R5</b>：任务查询接口此前只按 taskId 查询，调用方可任意指定 taskId
+ * （{@code userId} 也完全由请求体提供）⇒ 读到别人的采集结果（IDOR）。
+ * 现由 {@link #ownershipAllowed} 提供开关式归属校验，缺省关闭以保持存量调用方行为。
  */
 @Slf4j
 @RestController
@@ -39,6 +50,44 @@ public class CommentController {
     private final MasterTaskDao masterTaskDao;
     private final SubTaskDao subTaskDao;
     private final CommentDao commentDao;
+
+    /** 凭据注册表：归属校验需要把 API-Key 映射为调用方身份（修 R5）。 */
+    private final ApiKeyAuthenticator apiKeyAuthenticator;
+
+    /** 任务归属校验开关（修 R5），缺省关闭 = 保持存量调用方行为。 */
+    @Value("${collector.auth.task-isolation-enabled:false}")
+    private boolean taskIsolationEnabled;
+
+    // ── 归属校验（修 R5） ──────────────────────────────────────────────────
+
+    /**
+     * 任务读取归属校验。
+     *
+     * <p>用 {@code collector.auth.api-key-owners} 把请求头里的密钥映射为调用方身份，
+     * 与 {@code master_task.userId} 比对。<b>身份无法识别或任务无归属方时一律拒绝</b>（fail closed）。
+     *
+     * <p>校验失败统一返回 <b>404</b> 而非 403：403 会确认"任务存在但不是你的"，
+     * 等于给调用方一个存在性预言机。
+     *
+     * <p>缺省关闭：内部直连场景没有身份概念，强行开启会让所有调用方读不到数据。
+     */
+    private boolean ownershipAllowed(MasterTask task, HttpServletRequest request) {
+        if (!taskIsolationEnabled) {
+            return true;
+        }
+        String owner = apiKeyAuthenticator.ownerOf(request.getHeader(apiKeyAuthenticator.headerName()));
+        String taskOwner = task.getUserId();
+        if (StringUtils.isBlank(owner) || StringUtils.isBlank(taskOwner)) {
+            return false;
+        }
+        return constantTimeEquals(owner, taskOwner);
+    }
+
+    /** 身份比对同样走常量时间，避免比对耗时泄露归属信息。 */
+    private static boolean constantTimeEquals(String a, String b) {
+        return MessageDigest.isEqual(a.getBytes(StandardCharsets.UTF_8), b.getBytes(StandardCharsets.UTF_8));
+    }
+
 
     // ── 同步采集 ───────────────────────────────────────────────────────────
 
@@ -172,7 +221,9 @@ public class CommentController {
             totalLinks += task.getTotalLinks();
             successLinks += task.getSuccessLinks();
             failedLinks += task.getFailedLinks();
-            if (!"COMPLETED".equals(task.getStatus()) && !"FAILED".equals(task.getStatus())) {
+            // 终态判定统一走 TaskStatuses（2026-10-11 起新增 PARTIAL，不能只比 COMPLETED/FAILED，
+            // 否则部分成功的主任务会被判成"仍在跑"，批次进度永远不 finished）
+            if (!TaskStatuses.MASTER_TERMINAL.contains(task.getStatus())) {
                 allFinished = false;
             }
         }
@@ -192,11 +243,19 @@ public class CommentController {
 
     @GetMapping("/tasks/{taskId}")
     @Operation(summary = "查询任务状态和结果")
-    public ResponseEntity<TaskQueryResponse> queryTask(@PathVariable String taskId) {
+    public ResponseEntity<TaskQueryResponse> queryTask(@PathVariable String taskId,
+                                                      HttpServletRequest request) {
         MasterTask masterTask = masterTaskDao.findById(taskId)
                 .orElse(null);
 
         if (masterTask == null) {
+            return ResponseEntity.notFound().build();
+        }
+
+        // 归属校验（修 R5）：开关关闭时本行必为 true，行为与改前完全一致
+        if (!ownershipAllowed(masterTask, request)) {
+            log.warn("任务查询被拒绝（归属不匹配或无法识别调用方）: taskId={} ip={}",
+                    taskId, request.getRemoteAddr());
             return ResponseEntity.notFound().build();
         }
 
@@ -247,7 +306,17 @@ public class CommentController {
             @PathVariable String taskId,
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "100") int size,
-            @RequestParam(required = false) String dataType) {
+            @RequestParam(required = false) String dataType,
+            HttpServletRequest request) {
+
+        // 归属校验（修 R5）：仅在开关打开时查主任务；关闭时保持"任务不存在也返回 200 空页"的既有行为
+        if (taskIsolationEnabled) {
+            MasterTask masterTask = masterTaskDao.findById(taskId).orElse(null);
+            if (masterTask == null || !ownershipAllowed(masterTask, request)) {
+                log.warn("采集结果查询被拒绝: taskId={} ip={}", taskId, request.getRemoteAddr());
+                return ResponseEntity.notFound().build();
+            }
+        }
 
         int safePage = Math.max(1, page);
         int safeSize = Math.min(Math.max(1, size), 1000);

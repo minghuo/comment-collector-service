@@ -1,5 +1,6 @@
 package com.sysj.collector.core.pipeline;
 
+import com.sysj.collector.domain.service.SystemConfigService;
 import com.sysj.collector.exception.ProviderInvocationException;
 import com.sysj.collector.exception.ProviderTimeoutException;
 
@@ -9,6 +10,7 @@ import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.ExecutionException;
@@ -44,32 +46,69 @@ import java.util.function.Supplier;
  * <h3>副作用</h3>
  * <p>供应商实现代码在 {@code collector-provider-*} 线程上执行，不再是消费者线程。
  * 这对本项目无影响（供应商只用 HTTP + 局部变量，没有 ThreadLocal 依赖），但接入新供应商时要注意。
+ *
+ * <h3>2026-10-11 修订：开关与池大小支持热覆盖</h3>
+ * 三个参数此前是纯 {@code @Value}（改配置必须重启），与其它组件的"properties 默认 + system_config 覆盖"
+ * 范式不一致。现在 {@code collector.pipeline.enabled} / {@code collector.pipeline.timeout-enabled} /
+ * {@code collector.pipeline.timeout-threads} 可被 DB 值覆盖：
+ * 开关每次调用现读；池大小由 {@link #refreshPoolSize()} 每
+ * {@code collector.pipeline.timeout-threads-refresh-ms}（默认 30s）核对一次，
+ * 变化时 {@code setMaximumPoolSize} 原地调整（缩小后多余的空闲线程会自然回收，在途调用不受影响）。
  */
 @Slf4j
 @Component
 public class TimeoutStage implements ProviderInvocationStage {
 
+    private final SystemConfigService systemConfigService;
+
     /** 管线总开关（压测时逐项隔离用，见 §9.2）。 */
     @Value("${collector.pipeline.enabled:true}")
-    private boolean pipelineEnabled;
+    private boolean pipelineEnabledDefault;
 
     /** 限时阶段单独开关。 */
     @Value("${collector.pipeline.timeout-enabled:true}")
-    private boolean timeoutEnabled;
+    private boolean timeoutEnabledDefault;
 
     /** 限时工作线程数；&lt;=0 表示按 CPU 自动（availableProcessors × 8，下限 64）。 */
     @Value("${collector.pipeline.timeout-threads:0}")
-    private int configuredThreads;
+    private int configuredThreadsDefault;
 
     private ThreadPoolExecutor executor;
     private final AtomicLong rejected = new AtomicLong();
     private final AtomicLong timedOut = new AtomicLong();
 
+    public TimeoutStage(SystemConfigService systemConfigService) {
+        this.systemConfigService = systemConfigService;
+    }
+
+    /** 管线总开关：DB 覆盖 properties 默认。 */
+    private boolean pipelineEnabled() {
+        return systemConfigService.getBool("collector.pipeline.enabled", pipelineEnabledDefault);
+    }
+
+    /** 限时阶段开关：DB 覆盖 properties 默认。 */
+    private boolean timeoutEnabled() {
+        return systemConfigService.getBool("collector.pipeline.timeout-enabled", timeoutEnabledDefault);
+    }
+
+    /** 配置的线程数（<=0 表示按 CPU 自动）：DB 覆盖 properties 默认。 */
+    private int configuredThreads() {
+        return systemConfigService.getInt("collector.pipeline.timeout-threads", configuredThreadsDefault);
+    }
+
+    /** 实际生效的线程数：配置 > 0 用配置值，否则按 CPU 自动（下限 64）。 */
+    private int effectiveThreads() {
+        int configured = configuredThreads();
+        return configured > 0 ? configured : autoThreads();
+    }
+
+    private static int autoThreads() {
+        return Math.max(64, Runtime.getRuntime().availableProcessors() * 8);
+    }
+
     @PostConstruct
     public void init() {
-        int threads = configuredThreads > 0
-                ? configuredThreads
-                : Math.max(64, Runtime.getRuntime().availableProcessors() * 8);
+        int threads = effectiveThreads();
         AtomicInteger seq = new AtomicInteger();
         ThreadFactory factory = r -> {
             Thread t = new Thread(r, "collector-provider-" + seq.incrementAndGet());
@@ -81,7 +120,32 @@ public class TimeoutStage implements ProviderInvocationStage {
                 new SynchronousQueue<>(), factory, new ThreadPoolExecutor.AbortPolicy());
         this.executor.allowCoreThreadTimeOut(true);
         log.info("调用限时线程池: maxThreads={}（{}）队列=不排队",
-                threads, configuredThreads > 0 ? "来自配置" : "按 CPU 自动");
+                threads, configuredThreads() > 0 ? "来自配置" : "按 CPU 自动");
+    }
+
+    /**
+     * 周期性核对线程池上限是否与当前配置一致（DB 改动最多 60s 生效，这里 30s 核对一次）。
+     *
+     * <p>只在数值真的变化时调用 {@code setMaximumPoolSize}（它会打断线程池内部协调：
+     * 缩小时中断空闲工作线程），避免无谓抖动。
+     */
+    @Scheduled(fixedDelayString = "${collector.pipeline.timeout-threads-refresh-ms:30000}")
+    public void refreshPoolSize() {
+        if (executor == null) {
+            return;
+        }
+        int target = effectiveThreads();
+        int current = executor.getMaximumPoolSize();
+        if (target == current) {
+            return;
+        }
+        try {
+            executor.setMaximumPoolSize(target);
+            log.info("调用限时线程池上限热更新: {} → {}（活跃 {}，队列=不排队）",
+                    current, target, executor.getActiveCount());
+        } catch (IllegalArgumentException e) {
+            log.warn("调用限时线程池上限调整失败(忽略本次): {} → {} error={}", current, target, e.getMessage());
+        }
     }
 
     @PreDestroy
@@ -103,7 +167,7 @@ public class TimeoutStage implements ProviderInvocationStage {
 
     @Override
     public <T> T invoke(InvocationContext ctx, Supplier<T> next) {
-        if (!pipelineEnabled || !timeoutEnabled || ctx.timeoutMs() <= 0) {
+        if (!pipelineEnabled() || !timeoutEnabled() || ctx.timeoutMs() <= 0) {
             return next.get();
         }
 

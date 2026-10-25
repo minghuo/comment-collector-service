@@ -73,9 +73,11 @@ public class TouTiaoLocalCrawlerProvider implements CommentProvider {
      * 获取今日头条文章评论。
      */
     private CommonEntity<Comment> getComment(String groupId, int page) {
+        // 修 R8：group_id/item_id 来自调用方 extra（mid），必须编码后拼 query
         String apiUrl = "https://www.toutiao.com/article/v2/tab_comments/?aid=24&app_name=toutiao_web&offset="
                 + (page - 1) * PAGE_SIZE + "&count=" + PAGE_SIZE
-                + "&_signature=&group_id=" + groupId + "&item_id=" + groupId;
+                + "&_signature=&group_id=" + ProviderUrls.encodeParam(groupId)
+                + "&item_id=" + ProviderUrls.encodeParam(groupId);
         Map<String, String> headMap = new HashMap<>();
         headMap.put("User-Agent", UA);
         try {
@@ -107,8 +109,10 @@ public class TouTiaoLocalCrawlerProvider implements CommentProvider {
      * 获取今日头条评论的回复。
      */
     private CommonEntity<Comment> getCommentChild(String commentId, int page) {
+        // 修 R8：id 来自调用方 extra（commentId），必须编码后拼 query
         String apiUrl = "https://www.toutiao.com/2/comment/v2/reply_list/?aid=24&app_name=toutiao_web&id="
-                + commentId + "&offset=" + (page - 1) * PAGE_SIZE + "&count=" + PAGE_SIZE + "&repost=0&_signature=_";
+                + ProviderUrls.encodeParam(commentId) + "&offset=" + (page - 1) * PAGE_SIZE
+                + "&count=" + PAGE_SIZE + "&repost=0&_signature=_";
         Map<String, String> headMap = new HashMap<>();
         headMap.put("User-Agent", UA);
         try {

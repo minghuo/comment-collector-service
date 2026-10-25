@@ -1,5 +1,6 @@
 package com.sysj.collector.core.ratelimit;
 
+import com.sysj.collector.core.circuit.CircuitRedisState;
 import com.sysj.collector.domain.dao.SupplierStateDao;
 import com.sysj.collector.domain.service.SystemConfigService;
 
@@ -77,15 +78,23 @@ public class AdaptiveRateLimiter {
     @Value("${collector.ratelimit.persist-interval-seconds:30}")
     private long persistIntervalSecondsDefault;
 
+    /**
+     * 限流相关 key（令牌桶 / 自适应延迟）的空闲过期时间（秒）。每次取令牌与调整延迟都会续期，
+     * 只清"长期无人触碰"的残留值 —— 例如某供应商几天不跑，不该让旧的激进延迟一直压着下次采集。
+     */
+    @Value("${collector.ratelimit.key-ttl-seconds:86400}")
+    private long keyTtlSeconds;
+
     private final StringRedisTemplate redisTemplate;
     private final SupplierStateDao supplierStateDao;
     private final SystemConfigService systemConfigService;
+    private final CircuitRedisState circuitRedisState;
 
     /** 本实例已触碰的限流 key（快照/落库节流用）。 */
     private final ConcurrentHashMap<String, State> states = new ConcurrentHashMap<>();
 
     /**
-     * 令牌桶一步（补充 + 判定）：KEYS=[bucket]；ARGV=[now, rate, capacity]。
+     * 令牌桶一步（补充 + 判定）：KEYS=[bucket]；ARGV=[now, rate, capacity, ttlSeconds]。
      * 返回 {allowed(0/1), deficitMs} —— 未取到时 deficitMs 是凑够 1 个令牌的毫秒数，
      * 客户端据此决定重试间隔（等待语义在客户端实现，见 {@link #acquire}）。
      */
@@ -93,6 +102,7 @@ public class AdaptiveRateLimiter {
             local now = tonumber(ARGV[1])
             local rate = tonumber(ARGV[2])
             local cap = tonumber(ARGV[3])
+            local ttlMs = tonumber(ARGV[4]) * 1000
             local tokens = tonumber(redis.call('HGET', KEYS[1], 'tokens') or '-1')
             local last = tonumber(redis.call('HGET', KEYS[1], 'lastMs') or '0')
             if tokens < 0 then
@@ -102,19 +112,23 @@ public class AdaptiveRateLimiter {
             tokens = math.min(cap, tokens + (now - last) / 1000.0 * rate)
             if tokens >= 1 then
               redis.call('HMSET', KEYS[1], 'tokens', tokens - 1, 'lastMs', now)
+              redis.call('PEXPIRE', KEYS[1], ttlMs)
               return {'1', '0'}
             end
             redis.call('HMSET', KEYS[1], 'tokens', tokens, 'lastMs', now)
+            redis.call('PEXPIRE', KEYS[1], ttlMs)
             local deficit = (1 - tokens) / math.max(rate, 1e-9) * 1000.0
             return {'0', tostring(deficit)}
             """, List.class);
 
     public AdaptiveRateLimiter(StringRedisTemplate redisTemplate,
                                SupplierStateDao supplierStateDao,
-                               SystemConfigService systemConfigService) {
+                               SystemConfigService systemConfigService,
+                               CircuitRedisState circuitRedisState) {
         this.redisTemplate = redisTemplate;
         this.supplierStateDao = supplierStateDao;
         this.systemConfigService = systemConfigService;
+        this.circuitRedisState = circuitRedisState;
     }
 
     @PostConstruct
@@ -179,7 +193,8 @@ public class AdaptiveRateLimiter {
                 long now = System.currentTimeMillis();
                 List<Object> result = redisTemplate.execute(TOKEN_SCRIPT,
                         List.of(bucketKey(key)),
-                        String.valueOf(now), String.valueOf(effectiveRate), String.valueOf(capacity));
+                        String.valueOf(now), String.valueOf(effectiveRate), String.valueOf(capacity),
+                        String.valueOf(keyTtlSeconds));
                 if (result != null && "1".equals(str(result, 0))) {
                     State s = state(key);
                     s.effectiveQps = effectiveRate;
@@ -225,11 +240,19 @@ public class AdaptiveRateLimiter {
             long before = delayOf(key);
             long after = AdaptiveDelayPolicy.nextDelay(before, latencyMs, success, params);
             if (before != after) {
-                redisTemplate.opsForValue().set(delayKey(key), String.valueOf(after));
+                redisTemplate.opsForValue().set(delayKey(key), String.valueOf(after),
+                        java.time.Duration.ofSeconds(Math.max(1, keyTtlSeconds)));
                 log.debug("自适应延迟调整: key={} {}ms -> {}ms (latency={}ms success={})",
                         key, before, after, latencyMs, success);
             }
-            s.effectiveQps = AdaptiveDelayPolicy.effectiveRate(s.lastStaticRate, after);
+            if (s.lastStaticRate > 0) {
+                s.effectiveQps = AdaptiveDelayPolicy.effectiveRate(s.lastStaticRate, after);
+            } else {
+                // 静态速率未知 = 限流阶段没执行过（collector.pipeline.enabled=false 或该供应商走开关跳过）。
+                // 此时 AdaptiveDelayPolicy.effectiveRate 恒返回 0，落库会把 effective_qps 写成 0 ——
+                // 0 表示"完全不能跑"而不是"未知"，会污染容量评估与监控，故保留上一次观测值不覆盖。
+                log.debug("静态速率未知（限流阶段未执行），保留上一次 effective_qps: key={}", key);
+            }
             persistIfDue(key, s);
         } catch (Exception e) {
             log.warn("自适应延迟调整失败(非关键，不影响本次调用结果): key={} error={}", key, e.getMessage());
@@ -259,9 +282,13 @@ public class AdaptiveRateLimiter {
         return result;
     }
 
-    /** 冷启动/人工复位时手动重置预热起点。 */
+    /**
+     * 冷启动/人工复位时手动重置预热起点（与熔断恢复写同一个 key，见 {@link #warmUpStartMs}）。
+     */
     public void restartWarmUp(String key) {
-        redisTemplate.opsForValue().set(warmUpKey(key), String.valueOf(System.currentTimeMillis()));
+        redisTemplate.opsForValue().set(circuitRedisState.warmupKeyOf(key),
+                String.valueOf(System.currentTimeMillis()),
+                java.time.Duration.ofSeconds(Math.max(1, keyTtlSeconds)));
     }
 
     /** 限流 key（platform:feature:providerKey）。 */
@@ -282,10 +309,19 @@ public class AdaptiveRateLimiter {
         }
     }
 
-    /** 共享的预热起点（毫秒）；&le;0 表示没有正在进行的预热。 */
+    /**
+     * 共享的预热起点（毫秒）；&le;0 表示没有正在进行的预热。
+     *
+     * <p>修 R3：预热起点是**熔断恢复信号**，由 {@code CircuitRedisState} 的熔断脚本在
+     * {@code HALF_OPEN→CLOSED} 时写入。此前读取方拼的是本类自己的 key 前缀
+     * （{@code collector:ratelimit:warmup:…}），写入方拼的是熔断前缀（{@code collector:circuit:warmup:…}）
+     * —— 两个 key 永不相等，于是本方法恒返回 0、{@code elapsed} 被当成 {@code Long.MAX_VALUE}、
+     * 预热系数恒为 1，"熔断恢复后平滑升速"实际等于没有预热。现在读写都走
+     * {@link CircuitRedisState#warmupKeyOf(String)} 一个来源，不可能再漂移。
+     */
     private long warmUpStartMs(String key) {
         try {
-            String raw = redisTemplate.opsForValue().get(warmUpKey(key));
+            String raw = redisTemplate.opsForValue().get(circuitRedisState.warmupKeyOf(key));
             return raw == null ? 0 : parseLong(raw, 0);
         } catch (Exception e) {
             return 0;
@@ -338,9 +374,10 @@ public class AdaptiveRateLimiter {
         return keyPrefix + ":delay:" + key;
     }
 
-    private String warmUpKey(String key) {
-        return keyPrefix + ":warmup:" + key;
-    }
+    // 预热起点 key 不在这里拼：它属于熔断命名空间（collector:circuit:warmup:*），
+    // 由 CircuitRedisState.warmupKeyOf 统一提供。
+    // 修 R3：读写两侧曾各拼各的前缀（写侧 collector:circuit、读侧 collector:ratelimit），
+    // 两个 key 永不相等，预热起点永远是"未开始"，WARM_UP 效果形同虚设。
 
     private String bucketKey(String key) {
         return keyPrefix + ":bucket:" + key;

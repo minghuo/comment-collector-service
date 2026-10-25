@@ -62,6 +62,16 @@ public class HuaweiBbsLocalCrawlerProvider implements CommentProvider {
 
     private static final int PAGE_SIZE = 20;
 
+    /**
+     * 帖子级终态错误码：{@code 100120026} = 指定的主题不存在 / 已被删除 / 正在被审核。
+     *
+     * <p>这是**不可重试**的业务终态：重试多少次结果都一样，而且每次失败都会被计入供应商的
+     * 熔断失败率与连续失败计数。实测（2026-10-10）一篇已删除帖在三轮采集里稳定贡献
+     * {@code 9 次失败 / consecutive_failures=4}，即"一篇死帖"就能把整个供应商推向 OPEN。
+     * 故按既定口径把它当**0 条成功**返回（不重试、不污染统计），原因只留在 WARN 日志里。
+     */
+    private static final String ERRCODE_TOPIC_GONE = "100120026";
+
     /** 帖子链接：cn.club.vmall.com/.../mhwnews/{dynamic|article|video|news|question}/id_{tid} */
     private static final Pattern TID_PATTERN = Pattern.compile("mhwnews/(dynamic|article|video|news|question)/id_(\\d+)");
 
@@ -117,11 +127,22 @@ public class HuaweiBbsLocalCrawlerProvider implements CommentProvider {
             if (StringUtils.isNotBlank(body) && "0".equals(CommonParser.getJsonPathOne(body, "$.errcode"))) {
                 return toPageResult(body, page, tid);
             }
-            log.warn("[huawei-bbs-local] 主评论响应异常: tid={} page={}", tid, page);
+            // 失败原因必须能一眼看出是"帖子没了"还是"接口变了"：带上上游 errcode/errmsg，
+            // 并通过 msg 透出（管线 §9.4 会把它拼进失败异常，最终落到 sub_task.error_message）
+            String reason = upstreamReason(body);
+            if (isTopicGone(body)) {
+                log.warn("[huawei-bbs-local] 帖子已删除/审核中（帖子级终态，不重试，按 0 条成功）: tid={} page={} {}",
+                        tid, page, reason);
+                return emptySuccess(reason);
+            }
+            log.warn("[huawei-bbs-local] 主评论响应异常: tid={} page={} {}", tid, page, reason);
+            return CommonEntity.<Comment>builder().haseMore(false)
+                    .msg(reason).status(CommonStatusEnum.STATUS_ERROR).build();
         } catch (Exception e) {
             log.warn("[huawei-bbs-local] 主评论采集出错: tid={} page={} error={}", tid, page, e.getMessage());
+            return CommonEntity.<Comment>builder().haseMore(false)
+                    .msg("请求异常: " + e.getMessage()).status(CommonStatusEnum.STATUS_ERROR).build();
         }
-        return CommonEntity.<Comment>builder().haseMore(false).status(CommonStatusEnum.STATUS_ERROR).build();
     }
 
     /** 子回复一页。 */
@@ -138,12 +159,65 @@ public class HuaweiBbsLocalCrawlerProvider implements CommentProvider {
             if (StringUtils.isNotBlank(body) && "0".equals(CommonParser.getJsonPathOne(body, "$.errcode"))) {
                 return toPageResult(body, page, tid);
             }
-            log.warn("[huawei-bbs-local] 子回复响应异常: tid={} commentId={} page={}", tid, commentId, page);
+            String reason = upstreamReason(body);
+            if (isTopicGone(body)) {
+                log.warn("[huawei-bbs-local] 帖子已删除/审核中（帖子级终态，不重试，按 0 条成功）: "
+                                + "tid={} commentId={} page={} {}", tid, commentId, page, reason);
+                return emptySuccess(reason);
+            }
+            log.warn("[huawei-bbs-local] 子回复响应异常: tid={} commentId={} page={} {}",
+                    tid, commentId, page, reason);
+            return CommonEntity.<Comment>builder().haseMore(false)
+                    .msg(reason).status(CommonStatusEnum.STATUS_ERROR).build();
         } catch (Exception e) {
             log.warn("[huawei-bbs-local] 子回复采集出错: tid={} commentId={} page={} error={}",
                     tid, commentId, page, e.getMessage());
+            return CommonEntity.<Comment>builder().haseMore(false)
+                    .msg("请求异常: " + e.getMessage()).status(CommonStatusEnum.STATUS_ERROR).build();
         }
-        return CommonEntity.<Comment>builder().haseMore(false).status(CommonStatusEnum.STATUS_ERROR).build();
+    }
+
+    /**
+     * 把上游响应压成一行可读原因。
+     *
+     * <p>华为 SGW 网关用业务错误码表达"帖子级终态"，例如
+     * {@code errcode=100120026 / errmsg=抱歉，指定的主题不存在或已被删除或正在被审核}
+     * —— 这种失败重试多少次都一样，必须能从日志和 {@code sub_task.error_message} 里直接看出来，
+     * 否则运维只能看到笼统的 {@code STATUS_ERROR}。
+     */
+    private static String upstreamReason(String body) {
+        if (StringUtils.isBlank(body)) {
+            return "上游返回空响应";
+        }
+        return "上游 errcode=" + CommonParser.getJsonPathOne(body, "$.errcode")
+                + " errmsg=" + CommonParser.getJsonPathOne(body, "$.errmsg");
+    }
+
+    /**
+     * 响应是否为"帖子级终态"（帖子不存在 / 已删除 / 审核中）。
+     *
+     * <p>抽成独立静态方法是为了能脱离 HTTP 直接验证：只有这一个错误码走"不重试 + 0 条成功"，
+     * 其余非零 {@code errcode}（接口变更、风控、网关异常）必须继续按失败处理并重试。
+     */
+    static boolean isTopicGone(String body) {
+        if (StringUtils.isBlank(body)) {
+            return false;
+        }
+        return ERRCODE_TOPIC_GONE.equals(
+                StringUtils.trimToEmpty(CommonParser.getJsonPathOne(body, "$.errcode")));
+    }
+
+    /**
+     * 帖子级终态的返回：0 条、无下一页，但 {@code status = STATUS_SUCCESS}。
+     *
+     * <p>与"帖子里本来就没评论"（真实 {@code totalNum=0}）在结果上完全一致：
+     * 子任务落库为 {@code {"count":0,"hasMore":false,"nextCursor":null}}、终态 SUCCESS，
+     * 既不重试也不计入熔断失败率；区别只在 WARN 日志里的 {@code msg}。
+     */
+    private static CommonEntity<Comment> emptySuccess(String msg) {
+        return CommonEntity.<Comment>builder().haseMore(false)
+                .totalPage(0).msg(msg)
+                .status(CommonStatusEnum.STATUS_SUCCESS).dataList(new ArrayList<>()).build();
     }
 
     /** topicComment/subComment 共用解析：data 数组 → Comment，空页或取满 totalNum 即无下一页。 */

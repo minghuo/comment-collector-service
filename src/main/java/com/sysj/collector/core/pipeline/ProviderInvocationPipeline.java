@@ -19,6 +19,7 @@ import org.springframework.stereotype.Component;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -104,6 +105,10 @@ public class ProviderInvocationPipeline {
      * 于是把一个**完全健康**的供应商熔断掉；自适应限速也会跟着降速，让压力更集中。
      * 因此用 {@code attempted} 区分"调用了但失败"（要上报）与"根本没调用"（不上报）。
      *
+     * <p><b>上报的 latency 是供应商自己的耗时</b>（{@code fetchComments} 的墙钟，含供应商内部重试与翻页），
+     * <b>不含</b> Bulkhead 排队、限流等待与重试退避 sleep —— 熔断器的慢调用判定与自适应限速都必须按前者：
+     * 否则"我们自己让调用等了多久"会被记成"上游慢"，越排队越降速，形成自我恶化。
+     *
      * @param request  采集请求
      * @param provider 该供应商的 DB 配置
      * @param impl     供应商实现
@@ -114,18 +119,27 @@ public class ProviderInvocationPipeline {
         InvocationContext ctx = newContext(request, provider);
         long started = System.nanoTime();
         boolean success = false;
-        // 供应商代码在限时阶段可能跑在别的线程上，因此这里必须是跨线程可见的
+        // 供应商代码在限时阶段可能跑在别的线程上，因此这两个必须是跨线程可见的
         AtomicBoolean attempted = new AtomicBoolean(false);
+        // -1 = 还没回填（例如超时后被取消，供应商线程来不及写）；0 = 真的亚毫秒
+        AtomicLong providerLatencyMs = new AtomicLong(-1L);
         try {
             CommonEntity<Comment> entity = enabled()
-                    ? runChain(ctx, () -> attempt(ctx, impl, request, attempted))
-                    : attempt(ctx, impl, request, attempted);
+                    ? runChain(ctx, () -> attempt(ctx, impl, request, attempted, providerLatencyMs))
+                    : attempt(ctx, impl, request, attempted, providerLatencyMs);
             success = true;
             return entity;
         } finally {
-            long latencyMs = (System.nanoTime() - started) / 1_000_000L;
+            long chainMs = (System.nanoTime() - started) / 1_000_000L;
+            long providerMs = providerLatencyMs.get();
+            // 超时路径下供应商线程可能还没回填 → 退回整链墙钟（此时它必然不小于单次超时，用于慢调用判定是合理的）
+            long latencyMs = providerMs >= 0 ? providerMs : chainMs;
             if (attempted.get()) {
                 router.markProviderOutcome(ctx.platformCode(), ctx.featureCode(), provider, latencyMs, success);
+                if (log.isDebugEnabled()) {
+                    log.debug("供应商调用结果: key={} success={} provider={}ms chain={}ms",
+                            ctx.supplierKey(), success, providerMs, chainMs);
+                }
             } else {
                 log.debug("未触达供应商，跳过运行时状态上报: key={} 原因={}", ctx.supplierKey(),
                         success ? "?" : "被管线前置阶段拒绝");
@@ -145,9 +159,18 @@ public class ProviderInvocationPipeline {
      * 调参建议见文档 §9.5：对失败多为确定性的供应商，把 {@code max_retry} 配小或配 0。
      */
     private CommonEntity<Comment> attempt(InvocationContext ctx, CommentProvider impl,
-                                          CommentCollectRequest request, AtomicBoolean attempted) {
+                                          CommentCollectRequest request, AtomicBoolean attempted,
+                                          AtomicLong providerLatencyMs) {
         attempted.set(true);
-        CommonEntity<Comment> entity = impl.fetchComments(request);
+        long started = System.nanoTime();
+        CommonEntity<Comment> entity;
+        try {
+            entity = impl.fetchComments(request);
+        } finally {
+            // 只计"真正打到供应商"的那一段（供应商内部的重试与翻页都算在内），
+            // 不含外层的排队、限流等待与退避 sleep
+            providerLatencyMs.set((System.nanoTime() - started) / 1_000_000L);
+        }
         validate(ctx, entity);
         return entity;
     }

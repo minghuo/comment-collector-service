@@ -77,6 +77,17 @@ public class ProviderCircuitBreaker {
     @Value("${collector.circuit.persist-interval-seconds:30}")
     private long persistIntervalSeconds;
 
+    /** 驱逐比例上限（Envoy {@code outlier_detection.max_ejection_percent}）；100 = 不限制。 */
+    @Value("${collector.circuit.max-ejection-percent:100}")
+    private int maxEjectionPercentDefault;
+
+    /**
+     * panic 阈值（Envoy {@code outlier_detection.panic_threshold}）：可用候选占比低于该百分比时
+     * 放行一个"最不坏"候选；**0 = 关闭 panic**（缺省，保持既有语义）。
+     */
+    @Value("${collector.circuit.panic-threshold-percent:0}")
+    private int panicThresholdPercentDefault;
+
     /** 本实例本地累计（观测聚合）：supplierKey → totals。 */
     private final ConcurrentHashMap<String, Totals> localTotals = new ConcurrentHashMap<>();
 
@@ -124,6 +135,28 @@ public class ProviderCircuitBreaker {
         } catch (Exception e) {
             // Redis 抖动：放行兜底（宁可多打一次，不能因健康检查自身故障掐断全部采集）
             log.warn("熔断放行判定失败，按放行兜底: key={} error={}", supplierKey, e.getMessage());
+            return true;
+        }
+    }
+
+    /**
+     * 候选资格判断（**纯读、无副作用**）—— 路由的"择优"用它，真正执行前的闸门用
+     * {@link #allowRequest}。
+     *
+     * <p>修 R1：旧实现两处都调 {@code allowRequest}，而它在冷却期满时会推进状态机并扣掉一个
+     * 半开探测名额；候选过滤阶段就把名额烧光，闸门只剩拒绝 —— 熔断恢复期系统性误拒，
+     * {@code half-open-calls=1} 时永不自愈。职责拆开后，"选候选"不再有任何副作用。
+     */
+    public boolean isEligible(String platformCode, String featureCode, String providerKey) {
+        if (!enabled()) {
+            return true;
+        }
+        String supplierKey = supplierKey(platformCode, featureCode, providerKey);
+        try {
+            return redisState.isEligible(supplierKey, System.currentTimeMillis(), config().openSeconds());
+        } catch (Exception e) {
+            // 与 allowRequest 同口径：健康检查自身故障不应掐断采集
+            log.warn("熔断候选资格判定失败，按可用兜底: key={} error={}", supplierKey, e.getMessage());
             return true;
         }
     }
@@ -264,16 +297,20 @@ public class ProviderCircuitBreaker {
             }
             doc.setLastHeartbeat(Instant.now());
             doc.setUpdateTime(Instant.now());
-            supplierStateDao.save(doc);
+            supplierStateDao.upsertBreakerSnapshot(doc);
         } catch (Exception e) {
             log.warn("熔断状态落库失败(非关键): key={} error={}", supplierKey, e.getMessage());
         }
     }
 
-    /** Mongo 历史状态（首次触碰播种用；本实例已触碰过的直接传 null 免去无谓读库）。 */
+    /** Mongo 历史状态（首次触碰播种用；本实例已注册过的直接传 null 免去无谓读库）。 */
     private SupplierState seedCandidate(String supplierKey) {
-        if (localTotals.containsKey(supplierKey) || lastPersistAt.containsKey(supplierKey)) {
-            return null; // 已触碰过：Redis 状态必然已建立
+        if (redisState.isRegistered(supplierKey)) {
+            // 已注册即"播种判定"只做过一次（Redis 状态此时必然已建立）。
+            // 修 R2 附带：旧判据是 localTotals/lastPersistAt，而 lastPersistAt 是**落库节流时间戳**
+            // （落库失败也会写入），于是 Mongo 故障期间第一次落库失败之后，播种被永久跳过 ——
+            // Redis 熔断状态再也无法从库恢复。改用注册标记后判据只由"是否真读过库"决定。
+            return null;
         }
         try {
             return supplierStateDao.findBySupplierKey(supplierKey).orElse(null);
@@ -321,6 +358,33 @@ public class ProviderCircuitBreaker {
                 systemConfigService.getLong("collector.circuit.open-seconds", openSeconds),
                 (int) systemConfigService.getLong("collector.circuit.half-open-calls", halfOpenCalls)
         ).sanitized();
+    }
+
+    /**
+     * 驱逐与 panic 策略（Envoy {@code outlier_detection} 的等价物）。
+     *
+     * @param maxEjectionPercent    驱逐比例上限；100 = 不限制（缺省）。
+     *                              再驱逐一个就会超过该比例时**不驱逐**，把候选留在池子里 ——
+     *                              这正是 Envoy 要防的"把整个集群的 host 驱逐干净"。
+     * @param panicThresholdPercent 可用候选占比低于此值时进入 panic（放行一个最不坏候选）；
+     *                              **0 = 关闭**（缺省）。Envoy 缺省 50，但本项目候选集只有 1~5 个，
+     *                              50% 会让 3 候选场景下驱逐 2 个就 panic，等于把熔断关掉，
+     *                              故缺省关闭、由运维按平台规模显式开启（如候选 ≥4 个时设 50）。
+     */
+    public record EjectionPolicy(int maxEjectionPercent, int panicThresholdPercent) {
+    }
+
+    /** 当前生效的驱逐/panic 策略（每次现读，与 {@link #config()} 同源，可被 system_config 覆盖）。 */
+    public EjectionPolicy ejectionPolicy() {
+        return new EjectionPolicy(
+                clampPercent((int) systemConfigService.getLong(
+                        "collector.circuit.max-ejection-percent", maxEjectionPercentDefault)),
+                clampPercent((int) systemConfigService.getLong(
+                        "collector.circuit.panic-threshold-percent", panicThresholdPercentDefault)));
+    }
+
+    private static int clampPercent(int value) {
+        return value < 0 ? 0 : Math.min(value, 100);
     }
 
     /** 本实例本地累计（观测聚合，不参与判定）。 */

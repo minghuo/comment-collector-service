@@ -74,7 +74,10 @@ public class TaskRecoveryService {
             for (SubTask subTask : pendingSubTasks) {
                 String status = subTask.getStatus();
                 if ("PENDING".equals(status) || "RUNNING".equals(status)) {
-                    // RUNNING 状态无法精确恢复，重置为 PENDING 后重新提交
+                    // RUNNING 状态无法精确恢复：先按 PENDING 交回任务管理服务，
+                    // 由它用条件更新（PENDING→RUNNING；RUNNING 且更新时刻已陈旧→接管）决定是否真的重投。
+                    // 2026-10-11 修订：这里不再整文档落库（原先的 save 会把正在跑的实例踢成重复投递），
+                    // 陈旧判据见 collector.recovery.stale-running-ms（默认 600000ms）。
                     subTask.setStatus("PENDING");
                     subTask.setRetryCount(0);
                     subTask.setNextExecuteTime(null);

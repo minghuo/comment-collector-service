@@ -12,6 +12,7 @@ import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
 import com.sysj.collector.model.CommonStatusEnum;
+import com.sysj.collector.core.provider.support.ProviderUrls;
 import com.sysj.collector.core.provider.support.HttpUtilProvider;
 import com.sysj.http.HttpUtil;
 import lombok.extern.slf4j.Slf4j;
@@ -65,16 +66,19 @@ public class WeiboGolaxyCrawlerProvider implements CommentProvider {
             return CommonEntity.<Comment>builder().haseMore(false)
                     .status(CommonStatusEnum.STATUS_PARAM).build();
         }
+        // 修 R8：mid/commentId/cursor 来自调用方 extra 或上游游标，必须 URL 编码后再拼 query
         String apiUrl;
         if (StringUtils.isNotBlank(commentId)) {
             apiUrl = String.format("%s/reply/weibo/v2?apiKey=%s&video_id=%s&comment_id=%s",
-                    GolaxyConstants.COMMENT_BASE_URL, GolaxyConstants.COMMENT_API_KEY, mid, commentId);
+                    GolaxyConstants.COMMENT_BASE_URL, GolaxyConstants.COMMENT_API_KEY,
+                    ProviderUrls.encodeParam(mid), ProviderUrls.encodeParam(commentId));
         } else {
             apiUrl = String.format("%s/weibo?apiKey=%s&video_id=%s",
-                    GolaxyConstants.COMMENT_BASE_URL, GolaxyConstants.COMMENT_API_KEY, mid);
+                    GolaxyConstants.COMMENT_BASE_URL, GolaxyConstants.COMMENT_API_KEY,
+                    ProviderUrls.encodeParam(mid));
         }
         if (StringUtils.isNotBlank(cursor)) {
-            apiUrl = apiUrl + "&cursor=" + cursor;
+            apiUrl = apiUrl + "&cursor=" + ProviderUrls.encodeParam(cursor);
         }
         return fetch(apiUrl);
     }

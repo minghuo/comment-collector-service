@@ -20,9 +20,12 @@ import java.time.Instant;
 @Data
 @Document(collection = "sub_task")
 @CompoundIndexes({
-        // 同一主任务下链接唯一（幂等去重的落库兜底；建任务时已先去重）。
+        // 同一主任务 + 链接 + 翻页深度唯一（幂等去重的落库兜底；建任务时已先去重）。
+        // 必须带 page_count：自动翻页续采子任务刻意复用父链接、只递增 page_count（1=首次提交，2+=续采），
+        // 少了这一列会让第一条续采子任务就撞唯一键（修 R4，详见 db/init-comment-collector.js）。
         // 注意 def 字符串不经过命名策略，必须写落库名
-        @CompoundIndex(name = "idx_master_link_unique", def = "{'master_task_id': 1, 'link': 1}", unique = true)
+        @CompoundIndex(name = "idx_master_link_page_unique",
+                def = "{'master_task_id': 1, 'link': 1, 'page_count': 1}", unique = true)
 })
 public class SubTask {
 

@@ -16,13 +16,22 @@ public final class TaskStatuses {
     public static final String MASTER_PENDING = "PENDING";
     /** 执行中。 */
     public static final String MASTER_ACTIVE = "ACTIVE";
-    /** 全部子任务终态且至少一个成功。 */
+    /** 全部子任务终态且全部成功。 */
     public static final String MASTER_COMPLETED = "COMPLETED";
     /** 全部子任务终态且全部失败。 */
     public static final String MASTER_FAILED = "FAILED";
+    /**
+     * 全部子任务终态，既非全成功也非全失败（部分成功）。
+     *
+     * <p>2026-10-11 新增：此前"部分失败"被写成 {@link #MASTER_COMPLETED}，
+     * 调用方只看 {@code COMPLETED} 会以为"这一批全采到了"，实际有链接没采到 ——
+     * 失败信息只留在 {@code failedLinks} 计数里，容易被漏读。现在三态互斥。
+     */
+    public static final String MASTER_PARTIAL = "PARTIAL";
 
-    /** 主任务终态集合。 */
-    public static final List<String> MASTER_TERMINAL = List.of(MASTER_COMPLETED, MASTER_FAILED);
+    /** 主任务终态集合（三态都算"跑完了"）。 */
+    public static final List<String> MASTER_TERMINAL =
+            List.of(MASTER_COMPLETED, MASTER_FAILED, MASTER_PARTIAL);
 
     // ── 子任务（sub_task.status） ─────────────────────────────────────────
 
@@ -33,15 +42,32 @@ public final class TaskStatuses {
     public static final String SUB_SUCCESS = "SUCCESS";
     public static final String SUB_FAILED = "FAILED";
 
+    /** 子任务终态集合。 */
+    public static final List<String> SUB_TERMINAL = List.of(SUB_SUCCESS, SUB_FAILED);
+
     /**
-     * 终态判定（与历史 {@code refreshMasterTaskStatus} 口径一致）：
-     * 全部失败 → FAILED；有任一成功 → COMPLETED。
+     * 子任务非终态白名单（{@code in} 语义，比 {@code nin 终态} 更严）。
+     *
+     * <p>条件更新一律用白名单：`status.nin(终态)` 只排除两个终态，任何未知/脏状态
+     * 都会被当成"可以写"；白名单下只有这三个状态允许被推入下一状态。
+     */
+    public static final List<String> SUB_NON_TERMINAL = List.of(SUB_PENDING, SUB_RUNNING, SUB_RETRYING);
+
+    /**
+     * 终态判定（三态互斥）：
+     * 无失败 → COMPLETED；有失败且无成功 → FAILED；两者都有 → PARTIAL。
+     *
+     * <p>2026-10-11 改口径：部分失败不再并入 COMPLETED。调用方若只关心"跑完了没"，
+     * 请用 {@link #MASTER_TERMINAL} 判断，而不是只比 {@code COMPLETED}。
      *
      * @param success 成功子任务数
      * @param failed  失败子任务数
      */
     public static String masterTerminalStatusOf(long success, long failed) {
-        return failed > 0 && success == 0 ? MASTER_FAILED : MASTER_COMPLETED;
+        if (failed <= 0) {
+            return MASTER_COMPLETED;
+        }
+        return success > 0 ? MASTER_PARTIAL : MASTER_FAILED;
     }
 
     private TaskStatuses() {

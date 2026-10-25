@@ -5,7 +5,6 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Predicate;
 
 /**
  * 支持"出队时重算优先级"的阻塞优先队列。
@@ -38,7 +37,15 @@ public class PriorityTaskQueue<T extends Prioritized> {
 
     private final List<T> items = new ArrayList<>();
 
-    private final Semaphore available = new Semaphore(0);
+    /**
+     * 唤醒信号；**公平模式**（2026-10-11 修正）。
+     *
+     * <p>非公平 {@link Semaphore} 允许"插队"（barging）：刚进入 {@code acquire} 的线程可以
+     * 抢在已等待许久的线程之前拿到许可。消费者线程数（32）远多于任务流转速率时，
+     * 个别线程可能长时间取不到任务（饥饿），与"公平配额/防饥饿"的设计意图相悖，
+     * 因此改用公平模式（FIFO）。代价是每次 acquire 多一次队列操作，量级可忽略。
+     */
+    private final Semaphore available = new Semaphore(0, true);
 
     /** 剩余容量许可；无界时为 null。 */
     private final Semaphore slots;
@@ -58,7 +65,8 @@ public class PriorityTaskQueue<T extends Prioritized> {
      */
     public PriorityTaskQueue(int capacity) {
         this.capacity = capacity;
-        this.slots = capacity > 0 ? new Semaphore(capacity) : null;
+        // 公平模式：预留/归还按 FIFO，避免高并发提交时个别请求长期抢不到名额（2026-10-11 修正）
+        this.slots = capacity > 0 ? new Semaphore(capacity, true) : null;
     }
 
     /** 取下一个入队序号（调用方在构造/入队前领取）。 */
@@ -135,18 +143,7 @@ public class PriorityTaskQueue<T extends Prioritized> {
     /** 非阻塞取出当前最优先的任务；队列为空返回 null。 */
     public T poll() {
         synchronized (items) {
-            return removeBest(items, null);
-        }
-    }
-
-    /**
-     * 非阻塞取出**满足条件**的任务中最优先的一个；无匹配返回 null。
-     *
-     * <p>公平配额用它来"优先捞一个低优先级任务"。
-     */
-    public T pollIf(Predicate<T> predicate) {
-        synchronized (items) {
-            return removeBest(items, predicate);
+            return removeBest(items);
         }
     }
 
@@ -184,15 +181,12 @@ public class PriorityTaskQueue<T extends Prioritized> {
     }
 
     /**
-     * 返回满足条件（predicate 为 null 时表示全部）的最优先元素并移除。
+     * 返回最优先的元素并移除（按当前 {@link Prioritized#effectivePriority()} 现算）。
      */
     @SuppressWarnings("unchecked")
-    private T removeBest(List<T> list, Predicate<T> predicate) {
+    private T removeBest(List<T> list) {
         T best = null;
         for (T t : list) {
-            if (predicate != null && !predicate.test(t)) {
-                continue;
-            }
             if (best == null || ORDER.compare(t, best) < 0) {
                 best = t;
             }

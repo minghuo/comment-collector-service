@@ -87,11 +87,13 @@ public class WechatCommentCrawlerProvider implements CommentProvider {
         for (int i = 0; i < RETRY; i++) {
             try {
                 String apiUrl = base;
+                // 修 R8：同一 URL 里 url 已是 URLCodeUtil 编码、buffer/comment_id 却没编码 ——
+                // 值里的 '&' 可借机追加/覆盖参数，'#' 会截断请求。这里统一走同一个编码器。
                 if (StringUtils.isNotBlank(buffer)) {
-                    apiUrl += "&buffer=" + buffer;
+                    apiUrl += "&buffer=" + URLCodeUtil.getURLEncode(buffer);
                 }
                 if (StringUtils.isNotBlank(commentId)) {
-                    apiUrl += "&comment_id=" + commentId;
+                    apiUrl += "&comment_id=" + URLCodeUtil.getURLEncode(commentId);
                 }
                 String body = httpUtil.getString(apiUrl, ProviderHeaders.syHeaders(), false);
                 Integer code = CommonTools.stringToInteger(CommonParser.getJsonPathOne(body, "$.code"));

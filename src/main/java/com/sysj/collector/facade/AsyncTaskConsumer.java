@@ -22,9 +22,11 @@ import org.springframework.stereotype.Component;
 import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 异步任务消费者（阶段2：消费 Redis Stream 外置队列）。
@@ -70,13 +72,19 @@ public class AsyncTaskConsumer {
     @Value("${collector.queue.pending-drain-every:25}")
     private int pendingDrainEvery;
 
-    /** 接管扫描间隔（毫秒）。 */
+    /** 接管扫描间隔（毫秒）默认值；system_config 同名键可覆盖（只用于"跳过本次"判断，见下方说明）。 */
     @Value("${collector.queue.claim-sweep-ms:60000}")
-    private long claimSweepMs;
+    private long claimSweepMsDefault;
 
-    /** 消息空闲多久才算"原消费者已死"（毫秒）——必须大于单任务最大执行时长。 */
+    /** 消息空闲多久才算"原消费者已死"（毫秒）默认值 —— 必须大于单任务最大执行时长；system_config 同名键可覆盖。 */
     @Value("${collector.queue.claim-min-idle-ms:600000}")
-    private long claimMinIdleMs;
+    private long claimMinIdleMsDefault;
+
+    /** 每次接管扫描 PEL 的条数默认值（XPENDING count）；system_config 同名键可覆盖。 */
+    private static final int CLAIM_SCAN_COUNT_DEFAULT = 200;
+
+    /** 上次真正执行接管扫描的时刻（毫秒），用于动态间隔判定。 */
+    private final AtomicLong lastClaimSweepAt = new AtomicLong(0);
 
     private final RedisTaskStream taskStream;
     private final CommentCollectionFacade facade;
@@ -122,8 +130,8 @@ public class AsyncTaskConsumer {
         for (int i = 0; i < threads; i++) {
             consumerExecutor.submit(this::consumeLoop);
         }
-        log.info("Redis Stream 消费者已启动: consumer={} threads={} blockMs={} claimMinIdle={}ms",
-                consumerName, threads, blockMs, claimMinIdleMs);
+        log.info("Redis Stream 消费者已启动: consumer={} threads={} blockMs={} claimMinIdle={}ms（claimMinIdle/扫描条数/扫描间隔可用 system_config 热覆盖）",
+                consumerName, threads, blockMs, claimMinIdleMs());
     }
 
     @PreDestroy
@@ -188,11 +196,32 @@ public class AsyncTaskConsumer {
                 taskMetrics.setQueueSize((int) taskStream.totalLength());
                 process(picked.tier(), picked.record());
             } catch (Exception e) {
+                // 消费组不存在（NOGROUP）：说明 Redis 侧组已消失（FLUSHALL/切库/删 key），
+                // 必须把进程内就绪标志置回未就绪，否则探活永远不会补建、消费静默停摆。
+                if (isNoGroup(e)) {
+                    taskStream.markGroupsLost("消费者读到 NOGROUP: " + e.getMessage());
+                    sleepQuiet(1000);
+                    continue;
+                }
                 // 阻塞读/处理异常都不是致命的：退避后继续；停机由 running 标志与 shutdownNow 收口
                 log.error("消费循环异常，退避后继续", e);
                 sleepQuiet(1000);
             }
         }
+    }
+
+    /** 异常链里是否出现 NOGROUP（Redis 组/流不存在的标志）。 */
+    static boolean isNoGroup(Throwable e) {
+        Set<Throwable> visited = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        Throwable cur = e;
+        while (cur != null && visited.add(cur)) {
+            String msg = cur.getMessage();
+            if (msg != null && msg.contains("NOGROUP")) {
+                return true;
+            }
+            cur = cur.getCause();
+        }
+        return false;
     }
 
     /** 清扫本消费者名下 pending；返回是否清扫到了消息。 */
@@ -315,23 +344,53 @@ public class AsyncTaskConsumer {
         if (!facade.isRedisAvailable()) {
             return;
         }
+        // 间隔动态化：@Scheduled 的 tick 在启动时固定，故这里再按当前配置值判断"这次要不要真扫"。
+        // 效果：调大间隔立即生效；调小到小于 tick 也不会比 tick 更频繁（要更频繁需改 properties 重启）。
+        long interval = claimSweepMs();
+        long now = System.currentTimeMillis();
+        if (now - lastClaimSweepAt.get() < interval) {
+            return;
+        }
+        lastClaimSweepAt.set(now);
+
+        long minIdleMs = claimMinIdleMs();
+        int scanCount = claimScanCount();
         for (String tier : List.of(QueueTiers.HIGH, QueueTiers.LOW)) {
             try {
                 List<RecordId> stale = new ArrayList<>();
-                for (var message : taskStream.pending(tier, 200)) {
-                    if (message.getElapsedTimeSinceLastDelivery().toMillis() >= claimMinIdleMs) {
+                for (var message : taskStream.pending(tier, scanCount)) {
+                    if (message.getElapsedTimeSinceLastDelivery().toMillis() >= minIdleMs) {
                         stale.add(message.getId());
                     }
                 }
                 if (stale.isEmpty()) {
                     continue;
                 }
-                taskStream.claim(tier, consumerName, claimMinIdleMs, stale);
-                log.info("XCLAIM 接管{}条遗留消息: stream={} consumer={}", stale.size(), tier, consumerName);
+                taskStream.claim(tier, consumerName, minIdleMs, stale);
+                log.info("XCLAIM 接管{}条遗留消息: stream={} consumer={} minIdle={}ms",
+                        stale.size(), tier, consumerName, minIdleMs);
             } catch (Exception e) {
                 log.warn("XCLAIM 接管扫描失败(非关键): stream={} error={}", tier, e.getMessage());
             }
         }
+    }
+
+    // ── 接管扫描的动态配置读取（system_config 覆盖 properties 默认，60s 缓存） ──
+
+    /** 空闲阈值：DB 覆盖 properties 默认。调大=更保守（不容易误接管在跑的实例），调小=更快接管。 */
+    private long claimMinIdleMs() {
+        return systemConfigService.getLong("collector.queue.claim-min-idle-ms", claimMinIdleMsDefault);
+    }
+
+    /** 每次扫描的 PEL 条数：DB 覆盖缺省 200；过小会漏接管（PEL 很长时本次只看到前 N 条）。 */
+    private int claimScanCount() {
+        long configured = systemConfigService.getLong("collector.queue.claim-scan-count", CLAIM_SCAN_COUNT_DEFAULT);
+        return (int) Math.max(1, Math.min(5000, configured));
+    }
+
+    /** 接管扫描间隔（毫秒）：DB 覆盖 properties 默认。 */
+    private long claimSweepMs() {
+        return Math.max(1000L, systemConfigService.getLong("collector.queue.claim-sweep-ms", claimSweepMsDefault));
     }
 
     /**

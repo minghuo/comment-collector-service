@@ -20,9 +20,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * <ul>
  *   <li>状态机：{@code CLOSED → OPEN → HALF_OPEN → CLOSED}，语义与原内存实现一致
  *       （冷却期结束自动转半开、半开探测名额、探测名额超时重新发放）；</li>
- *   <li>滑动窗口：ZSET（member = 标志位+序号），按"最近 N 次"裁剪，评估口径见
- *       {@link SlidingWindowEvaluator}；</li>
- *   <li>转 CLOSED 时顺带写预热起点（自适应限速的 warm-up 恢复联动，替代原 Spring 事件监听）。</li>
+ *   <li>滑动窗口：ZSET（member = 标志位+序号），按"最近 N 次"裁剪，**评估口径就在
+ *       {@code RECORD_OUTCOME} 脚本里**（2026-10-11 修正：原先客户端还留着一份纯 Java 的
+ *       {@code SlidingWindowEvaluator}，主代码零调用、与 Lua 口径重复，已删除以免两处漂移）；</li>
+ *   <li>转 CLOSED 时顺带写预热起点（自适应限速的 warm-up 恢复联动）；</li>
  * </ul>
  *
  * <p>每次 allow/上报 = 一次 Redis 往返（本机 Redis 亚毫秒级），相对秒级的供应商调用可忽略。
@@ -39,6 +40,15 @@ public class CircuitRedisState {
     @Value("${collector.circuit.redis-key-prefix:collector:circuit}")
     private String keyPrefix;
 
+    /**
+     * 熔断相关 key 的空闲过期时间（秒）。每次读/写都会刷新 TTL ——
+     * 目的是清掉"长期无人触碰的残留状态"（曾经出现 oppo/tieba 几天前熔断后一直没恢复：
+     * 计数型滑窗 key 无 TTL，重启与清理都得手工介入）。
+     * 只要供应商还有流量，TTL 就不断被续期，不会在活跃期丢失状态。
+     */
+    @Value("${collector.circuit.key-ttl-seconds:86400}")
+    private long keyTtlSeconds;
+
     private final StringRedisTemplate redisTemplate;
 
     /** 本实例已触碰过的供应商 key（snapshot/trackedCount 用；同时守护 Mongo 播种只做一次）。 */
@@ -46,10 +56,11 @@ public class CircuitRedisState {
 
     /**
      * 放行判定 + 冷却期满转半开 + 半开名额扣减 + 名额超时重发。
-     * KEYS=[state]；ARGV=[now, openSeconds, halfOpenCalls]。
+     * KEYS=[state]；ARGV=[now, openSeconds, halfOpenCalls, ttlSeconds]。
      * 返回 {allowed(0/1), prevState, newState}。
      */
     private static final DefaultRedisScript<List> TRY_ACQUIRE = new DefaultRedisScript<>("""
+            redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[4]) * 1000)
             local now = tonumber(ARGV[1])
             local openMs = tonumber(ARGV[2]) * 1000
             local halfCalls = tonumber(ARGV[3])
@@ -81,6 +92,7 @@ public class CircuitRedisState {
             end
             if not state then
               redis.call('HSET', KEYS[1], 'state', 'CLOSED')
+              redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[4]) * 1000)
             end
             return {'1', prev, 'CLOSED'}
             """, List.class);
@@ -88,10 +100,14 @@ public class CircuitRedisState {
     /**
      * 记录一次结果：半开探测成败迁移 / CLOSED 滑动窗口评估熔断 / OPEN 迟到结果只记账。
      * KEYS=[state, window, seq, warmup]；
-     * ARGV=[now, failed, slow, windowSize, minimumCalls, failureRateThreshold, slowRateThreshold, halfOpenCalls]。
+     * ARGV=[now, failed, slow, windowSize, minimumCalls, failureRateThreshold, slowRateThreshold, halfOpenCalls, ttlSeconds]。
      * 返回 {changed(0/1), from, to, reason}。
      */
     private static final DefaultRedisScript<List> RECORD_OUTCOME = new DefaultRedisScript<>("""
+            local ttlMs = tonumber(ARGV[9]) * 1000
+            redis.call('PEXPIRE', KEYS[1], ttlMs)
+            redis.call('PEXPIRE', KEYS[3], ttlMs)
+            redis.call('PEXPIRE', KEYS[4], ttlMs)
             local now = tonumber(ARGV[1])
             local failed = tonumber(ARGV[2])
             local slow = tonumber(ARGV[3])
@@ -113,6 +129,7 @@ public class CircuitRedisState {
                 redis.call('HMSET', KEYS[1], 'state', 'CLOSED', 'openedAt', 0, 'halfOpenPermits', 0)
                 redis.call('DEL', KEYS[2])
                 redis.call('SET', KEYS[4], now)
+                redis.call('PEXPIRE', KEYS[4], ttlMs)
                 return {'1', prev, 'CLOSED', '半开探测全部成功'}
               end
               return {'0', prev, 'HALF_OPEN', '半开探测成功 ' .. succ .. '/' .. halfCalls}
@@ -122,8 +139,10 @@ public class CircuitRedisState {
               return {'0', prev, 'OPEN', ''}
             end
             local seq = redis.call('INCR', KEYS[3])
+            redis.call('PEXPIRE', KEYS[3], ttlMs)
             local flags = (failed == 1 and 'f' or '') .. (slow == 1 and 's' or '')
             redis.call('ZADD', KEYS[2], seq, flags .. ':' .. seq)
+            redis.call('PEXPIRE', KEYS[2], ttlMs)
             local card = redis.call('ZCARD', KEYS[2])
             if card > windowSize then
               redis.call('ZREMRANGEBYRANK', KEYS[2], 0, card - windowSize - 1)
@@ -156,12 +175,15 @@ public class CircuitRedisState {
             return {'0', prev, 'CLOSED', ''}
             """, List.class);
 
-    /** 人工复位：KEYS=[state, window, warmup]；ARGV=[now]。 */
+    /** 人工复位：KEYS=[state, window, warmup]；ARGV=[now, ttlSeconds]。 */
     private static final DefaultRedisScript<Long> RESET_SCRIPT = new DefaultRedisScript<>("""
+            local ttlMs = tonumber(ARGV[2]) * 1000
             redis.call('HMSET', KEYS[1], 'state', 'CLOSED', 'openedAt', 0,
                        'halfOpenPermits', 0, 'halfOpenSuccesses', 0)
+            redis.call('PEXPIRE', KEYS[1], ttlMs)
             redis.call('DEL', KEYS[2])
             redis.call('SET', KEYS[3], ARGV[1])
+            redis.call('PEXPIRE', KEYS[3], ttlMs)
             return 1
             """, Long.class);
 
@@ -181,11 +203,47 @@ public class CircuitRedisState {
         registerAndSeed(supplierKey, seedFromMongo);
         List<Object> result = redisTemplate.execute(TRY_ACQUIRE,
                 List.of(stateKey(supplierKey)),
-                String.valueOf(now), String.valueOf(openSeconds), String.valueOf(halfOpenCalls));
+                String.valueOf(now), String.valueOf(openSeconds), String.valueOf(halfOpenCalls),
+                String.valueOf(keyTtlSeconds));
         return new AcquireResult(
                 "1".equals(str(result, 0)),
                 str(result, 1) == null ? "CLOSED" : str(result, 1),
                 str(result, 2) == null ? "CLOSED" : str(result, 2));
+    }
+
+    /**
+     * 候选资格判断（**纯读、无副作用**）：此刻该供应商是否值得排进候选列表。
+     *
+     * <p>修 R1：{@link #tryAcquire} 在冷却期满时会推进 {@code OPEN→HALF_OPEN} 并
+     * {@code HINCRBY halfOpenPermits -1}，占掉一个半开探测名额。路由的"选候选"只是择优筛选，
+     * 若它也用 {@code tryAcquire}，候选过滤阶段就会把名额烧光，等真正执行时闸门只剩拒绝 ——
+     * 熔断恢复期反而**系统性误拒**，{@code half-open-calls=1} 时更是永不自愈。
+     * 因此把"要不要选它"（本方法）与"这一刻准不准打"（{@link #tryAcquire}）拆开。
+     *
+     * <p>判定口径刻意与 {@code TRY_ACQUIRE} 的 Lua 分支逐条对齐，区别只是**不做任何写入**：
+     * <ul>
+     *   <li>无状态 / {@code CLOSED} → 可用；</li>
+     *   <li>{@code OPEN} → 仅当冷却期已过可用（真正的状态推进留给闸门）；</li>
+     *   <li>{@code HALF_OPEN} → 还有探测名额可用，或名额已耗尽但已到重新发放时间。</li>
+     * </ul>
+     * 本方法与真正的裁决之间仍有 TOCTOU 窗口（两个实例可能同时认为"冷却已过"），
+     * 那由 {@link #tryAcquire} 的 Lua 原子收敛；本方法只保证不做无谓的候选。
+     */
+    public boolean isEligible(String supplierKey, long now, long openSeconds) {
+        Map<Object, Object> fields = redisTemplate.opsForHash().entries(stateKey(supplierKey));
+        Object raw = fields.get("state");
+        String state = raw == null ? "CLOSED" : raw.toString();
+        long openMs = Math.max(0L, openSeconds) * 1000L;
+        if ("OPEN".equals(state)) {
+            return now - parseLong(fields.get("openedAt"), 0L) >= openMs;
+        }
+        if ("HALF_OPEN".equals(state)) {
+            if (parseLong(fields.get("halfOpenPermits"), 0L) > 0) {
+                return true;
+            }
+            return now - parseLong(fields.get("halfOpenStarted"), 0L) >= openMs;
+        }
+        return true;
     }
 
     /**
@@ -203,7 +261,8 @@ public class CircuitRedisState {
                 String.valueOf(config.minimumCalls()),
                 String.valueOf(config.failureRateThreshold()),
                 String.valueOf(config.slowCallRateThreshold()),
-                String.valueOf(config.halfOpenCalls()));
+                String.valueOf(config.halfOpenCalls()),
+                String.valueOf(keyTtlSeconds));
         return new OutcomeResult(
                 "1".equals(str(result, 0)),
                 str(result, 1) == null ? "CLOSED" : str(result, 1),
@@ -222,12 +281,17 @@ public class CircuitRedisState {
         knownKeys.put(supplierKey, Boolean.TRUE);
         redisTemplate.execute(RESET_SCRIPT,
                 List.of(stateKey(supplierKey), windowKey(supplierKey), warmupKeyOf(supplierKey)),
-                String.valueOf(System.currentTimeMillis()));
+                String.valueOf(System.currentTimeMillis()), String.valueOf(keyTtlSeconds));
     }
 
     /** 本实例已知的供应商 key 集合（快照用）。 */
     public List<String> knownSupplierKeys() {
         return List.copyOf(knownKeys.keySet());
+    }
+
+    /** 本实例是否已就该供应商做过首次注册（即 Mongo 播种判定已做完，不必再读库）。 */
+    public boolean isRegistered(String supplierKey) {
+        return knownKeys.containsKey(supplierKey);
     }
 
     // ── 内部 ───────────────────────────────────────────────────────────────
@@ -249,6 +313,7 @@ public class CircuitRedisState {
                 redisTemplate.opsForHash().putAll(stateKey(supplierKey), Map.of(
                         "state", "OPEN",
                         "openedAt", String.valueOf(openedAt)));
+                redisTemplate.expire(stateKey(supplierKey), java.time.Duration.ofSeconds(Math.max(1, keyTtlSeconds)));
                 log.warn("Redis 无熔断状态，已从 Mongo 播种 OPEN: key={} openedAt={}", supplierKey, openedAt);
             }
         } catch (Exception e) {
@@ -271,6 +336,18 @@ public class CircuitRedisState {
     /** 预热起点 key：熔断恢复转 CLOSED 时由 Lua 写入（自适应限速读取）。 */
     public String warmupKeyOf(String supplierKey) {
         return keyPrefix + ":warmup:" + supplierKey;
+    }
+
+    /** 从 Redis 返回的字段里取 long（StringRedisTemplate 下哈希值是字符串，容错解析）。 */
+    private static long parseLong(Object raw, long defaultValue) {
+        if (raw == null) {
+            return defaultValue;
+        }
+        try {
+            return (long) Double.parseDouble(raw.toString().trim());
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
     }
 
     private static String str(List<Object> result, int index) {

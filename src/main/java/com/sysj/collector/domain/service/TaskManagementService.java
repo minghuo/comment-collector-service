@@ -89,6 +89,14 @@ public class TaskManagementService implements TaskResultListener {
     @Value("${collector.task.auto-paging.max-pages:10}")
     private int autoPagingMaxPagesDefault;
 
+    /**
+     * "陈旧 RUNNING"判据默认值（毫秒）：启动恢复时，RUNNING 子任务的 update_time 早于
+     * {@code now - 该值} 才视为上个实例留下的墓碑并可被接管（见 {@link SubTaskDao#markRunningIfStale}）。
+     * 必须远大于单次采集的最大耗时，否则会把正在跑的实例重复投递。
+     */
+    @Value("${collector.recovery.stale-running-ms:600000}")
+    private long staleRunningMsDefault;
+
     // ── 动态配置读取（system_config 覆盖 properties 默认，60s 缓存） ────────
 
     private int subRetryMax() {
@@ -97,6 +105,12 @@ public class TaskManagementService implements TaskResultListener {
 
     private long subRetryBaseDelayMs() {
         return systemConfigService.getLong("collector.task.sub-retry-base-delay-ms", subRetryBaseDelayMsDefault);
+    }
+
+    /** 陈旧 RUNNING 判据（毫秒）：DB 覆盖 properties 默认；下限 10s 防止误配成 0 造成重复投递。 */
+    private long staleRunningMs() {
+        return Math.max(10_000L, systemConfigService.getLong(
+                "collector.recovery.stale-running-ms", staleRunningMsDefault));
     }
 
     private long subRetryMaxDelayMs() {
@@ -259,9 +273,15 @@ public class TaskManagementService implements TaskResultListener {
     /**
      * 提交单个子任务：写入 Redis Stream 外置队列，由消费者组执行。
      *
-     * <p>外置队列后提交与执行分离：本方法只做"置 RUNNING + 入队"，没有 Future 回调；
+     * <p>外置队列后提交与执行分离：本方法只做"抢占置 RUNNING + 入队"，没有 Future 回调；
      * 结果回写由消费者完成后经 {@link TaskResultListener#onSubTaskOutcome} 回到本服务
      * （可能发生在任意一个消费实例上）。
+     *
+     * <p><b>2026-10-11 修订（多实例抢占）</b>：此前是"整文档 {@code save} 成 RUNNING 再入队"，
+     * 没有条件更新语义 —— 多实例下同一子任务会被两个实例同时投递并执行、主任务计数翻倍。
+     * 现在改为两步 CAS（{@link SubTaskDao#markRunningIfPending} / {@link SubTaskDao#markRunningIfStale}），
+     * 与重投路径的 {@link #resubmitForRetry} 语义对齐：抢不到就静默跳过。
+     * 恢复扫描传入的子任务在 DB 里可能仍是 RUNNING（崩溃墓碑），故第二步用"更新时刻陈旧"兜住它。
      *
      * @param capacityReserved 历史参数：外置队列后容量在每条消息 XADD 时原子校验，
      *                         该参数不再影响行为，保留以兼容调用方
@@ -269,10 +289,21 @@ public class TaskManagementService implements TaskResultListener {
     public void submitSubTask(MasterTask masterTask, SubTask subTask, boolean capacityReserved) {
         CommentCollectRequest collectRequest = buildCollectRequest(masterTask, subTask);
 
+        Instant now = Instant.now();
+        boolean claimed = subTaskDao.markRunningIfPending(subTask.getId());
+        if (!claimed) {
+            // 不是 PENDING：可能是上个实例崩溃留下的 RUNNING 墓碑（启动恢复路径会遇到）。
+            claimed = subTaskDao.markRunningIfStale(subTask.getId(), now.minusMillis(staleRunningMs()));
+        }
+        if (!claimed) {
+            Integer retryCount = subTask.getRetryCount();
+            log.info("子任务已被其它实例领取或已终态，跳过本次投递: subTaskId={} status={} retryCount={}",
+                    subTask.getId(), subTask.getStatus(), retryCount == null ? 0 : retryCount);
+            return;
+        }
         subTask.setStatus(ST_RUNNING);
-        subTask.setStartTime(Instant.now());
-        subTask.setUpdateTime(Instant.now());
-        subTaskDao.save(subTask);
+        subTask.setStartTime(now);
+        subTask.setUpdateTime(now);
 
         try {
             collectionFacade.enqueueAsync(collectRequest);
@@ -298,20 +329,24 @@ public class TaskManagementService implements TaskResultListener {
     public void resubmitForRetry(MasterTask masterTask, SubTask subTask, long queueRescheduleMs) {
         CommentCollectRequest collectRequest = buildCollectRequest(masterTask, subTask);
 
+        // 条件抢占：多实例部署下每个实例的扫描都会读到同一批到期子任务，
+        // 只有把 RETRYING 成功改成 RUNNING 的那个实例可以入队，其余静默跳过（无需分布式锁）。
+        if (!subTaskDao.markRunningIfRetrying(subTask.getId())) {
+            log.info("子任务已被其它实例领取或已终态，跳过本次重投: subTaskId={}", subTask.getId());
+            return;
+        }
         subTask.setStatus(ST_RUNNING);
         subTask.setStartTime(Instant.now());
-        subTask.setUpdateTime(Instant.now());
-        subTaskDao.save(subTask);
 
         try {
             collectionFacade.enqueueAsync(collectRequest);
         } catch (QueueFullException qfe) {
             log.info("重投被队列拒绝，推迟到下次扫描: subTaskId={} retryCount={} 推迟{}ms",
                     subTask.getId(), subTask.getRetryCount(), queueRescheduleMs);
+            subTaskDao.markRetryingFromRunning(subTask.getId(),
+                    Instant.now().plusMillis(Math.max(1000, queueRescheduleMs)));
             subTask.setStatus(ST_RETRYING);
             subTask.setNextExecuteTime(Instant.now().plusMillis(Math.max(1000, queueRescheduleMs)));
-            subTask.setUpdateTime(Instant.now());
-            subTaskDao.save(subTask);
         }
     }
 
@@ -377,9 +412,19 @@ public class TaskManagementService implements TaskResultListener {
             }
 
             // 续采必须在终态计数之前：续采会原子扩张 totalLinks，
-            // 若先计数，最后一个原始链接完成时可能提前把主任务判到终态、提前触发回调
-            masterTaskDao.findById(masterTaskId).ifPresent(master ->
-                    createContinuationIfNeeded(master, subTask, result));
+            // 若先计数，最后一个原始链接完成时可能提前把主任务判到终态、提前触发回调。
+            //
+            // 修 R4：续采是"锦上添花"，绝不能因为它的异常把主任务的收敛计数吃掉 ——
+            // 子任务此刻已是 SUCCESS 终态，重复投递会因 markTerminalIfFirst 返回 false 直接 return，
+            // 于是 recordOutcomeAndFinish 永远不会执行，主任务的 成功+失败 永远小于 totalLinks，
+            // 既不收敛也不回调（表现为任务永久卡在 ACTIVE）。故此处必须兜住异常。
+            try {
+                masterTaskDao.findById(masterTaskId).ifPresent(master ->
+                        createContinuationIfNeeded(master, subTask, result));
+            } catch (Exception e) {
+                log.error("自动翻页续采失败(不影响本次终态计数): masterTaskId={} subTaskId={} error={}",
+                        masterTaskId, subTaskId, e.getMessage(), e);
+            }
 
             recordOutcomeAndFinish(masterTaskId, true);
             return;
@@ -479,13 +524,20 @@ public class TaskManagementService implements TaskResultListener {
     private void scheduleRetry(SubTask subTask, String errorMessage) {
         int nextRetry = subTask.getRetryCount() + 1;
         long delay = SubTaskRetryPolicy.backoffDelayMs(nextRetry, subRetryBaseDelayMs(), subRetryMaxDelayMs());
+        Instant nextExecuteTime = Instant.now().plusMillis(delay);
+        // 条件更新：子任务可能已被并发路径（重复投递）写成 SUCCESS/FAILED，
+        // 整文档 save 会把它复活成 RETRYING 并触发重复采集。
+        if (!subTaskDao.markRetryingIfNotTerminal(subTask.getId(), nextRetry, errorMessage, nextExecuteTime)) {
+            log.info("子任务已是终态，放弃重投: subTaskId={} retry={}/{}",
+                    subTask.getId(), nextRetry, subTask.getMaxRetry());
+            return;
+        }
         subTask.setRetryCount(nextRetry);
         subTask.setStatus(ST_RETRYING);
         subTask.setErrorMessage(errorMessage);
-        subTask.setNextExecuteTime(Instant.now().plusMillis(delay));
+        subTask.setNextExecuteTime(nextExecuteTime);
         subTask.setCompleteTime(null);
         subTask.setUpdateTime(Instant.now());
-        subTaskDao.save(subTask);
         log.info("子任务失败待重投: subTaskId={} retry={}/{} delay={}ms reason={}",
                 subTask.getId(), nextRetry, subTask.getMaxRetry(), delay, errorMessage);
     }

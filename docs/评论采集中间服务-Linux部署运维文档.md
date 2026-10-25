@@ -145,6 +145,17 @@ collector.circuit.minimum-calls=5
 collector.circuit.open-seconds=60
 collector.circuit.half-open-calls=3
 collector.circuit.persist-interval-seconds=30
+# Envoy 式驱逐上限：可被熔断隔离的候选比例上限（%），100=不限制
+collector.circuit.max-ejection-percent=100
+# Envoy 式 panic 阈值（%）：可用候选占比低于此值时强制放行一个候选，0=关闭
+collector.circuit.panic-threshold-percent=0
+# panic 放行许可的有效期（毫秒）；结构常量，只能改这里，system_config 覆盖不了
+collector.circuit.panic-allowance-ttl-ms=5000
+# 熔断 Redis key（state/window/seq/warmup）的 TTL（秒）。原先无过期时间，供应商下线后 key 会永久驻留；
+# 86400 表示"一天没有新调用就自动淘汰"。不要配 0（由 Math.max(1, …) 兜到 1 秒）。
+# 自检：redis-cli -n 5 --scan --pattern 'collector:circuit:*' 逐个 TTL 应≈86400，
+# 只有 collector:tasks:high/low 这两条流 key 是 -1（流不设 TTL，属预期）。
+collector.circuit.key-ttl-seconds=86400
 
 # ===== 过载保护（可选，有默认值）=====
 # 异步队列容量上限。名额不足时新的 POST /api/tasks 直接返回 503，不做无界排队。
@@ -156,6 +167,9 @@ collector.task.consumer-threads=0
 # 遇到问题版本时可先置 enabled=false，阻止"每次重启都重灌一批任务"放大故障
 collector.recovery.enabled=true
 collector.recovery.scan-on-startup=true
+# "陈旧 RUNNING"判据（毫秒）：DB 里仍是 RUNNING 的子任务，只有 update_time 早于 now-该值
+# 才被当成上个实例崩溃留下的墓碑并重新入队。必须远大于单次采集最大耗时（默认 600000 = 10 分钟）。
+collector.recovery.stale-running-ms=600000
 
 # ===== 自适应限速 + 流控效果（可选，有默认值）=====
 # 有效速率 = min(rate_per_second, 1000 / adaptive_delay_ms)；上游变慢时自动降速，失败只降不升
@@ -168,6 +182,8 @@ collector.ratelimit.max-queue-wait-ms=2000
 collector.ratelimit.warm-up-seconds=30
 # effective_qps / adaptive_delay_ms 写回 supplier_state 的节流间隔
 collector.ratelimit.persist-interval-seconds=30
+# 自适应限速 Redis key（delay:/warmup:/bucket:）的 TTL（秒）。到期即回到配置速率，避免旧延迟被新实例继承
+collector.ratelimit.key-ttl-seconds=86400
 
 # ===== 供应商调用管线（可选，有默认值）=====
 # 装配顺序：Bulkhead → CircuitBreaker → RateLimit → Retry → Timeout
@@ -178,10 +194,16 @@ collector.pipeline.enabled=true
 #    否则"超时返回"只是调用方放弃等待，底层请求仍在跑。
 collector.pipeline.timeout-ms=15000
 # 默认并发上限（Bulkhead）；供应商配置 providers[].max_concurrency 优先，0 = 不限。
-# 满了立即失败（不排队），由门面切换到下一个候选。
+# REJECT：满了立即失败（不排队），由门面切换到下一个候选。
+# THROTTLE_QUEUE：先有界排队，最多等 providers[].max_queue_wait_ms，且被下面的全局值封顶。
 collector.pipeline.default-max-concurrency=4
+# Bulkhead 排队上限（毫秒，默认 5000）；<=0 = 一律不排队（与修订前行为一致）。
+# 排队占的是消费者线程，所以供应商即使配了更长的 max_queue_wait_ms 也按此值封顶。
+collector.pipeline.bulkhead-max-queue-wait-ms=5000
 # 限时工作线程数上限；<=0 = 按 CPU 自动（max(64, availableProcessors × 8)）
 collector.pipeline.timeout-threads=0
+# 池上限热更新巡检周期（毫秒，默认 30000）：改了上面的值后最迟一个周期内生效，无需重启
+collector.pipeline.timeout-threads-refresh-ms=30000
 # 重试退避基数（毫秒）：第 n 次重试等待 base × 2^(n-1)
 collector.pipeline.retry-backoff-base-ms=500
 # 分阶段开关（压测逐项隔离）
@@ -228,7 +250,8 @@ MONGODB_URI=mongodb://user:password@host:27017/comment_task?authSource=admin&aut
 | 配置项 | 现状 | 处理建议 |
 |---|---|---|
 | `file.upload.dir.permission` / `file.upload.dir.path` / `interact.apiUrl` | 被 `CommonConfig` 读取，但**本服务并不使用**（无文件上传、无互动指标上报） | 可保留占位或后续清理 |
-| `spring.data.redis.*` / `spring.cache.redis.*` | 无效配置：缓存实际用 Caffeine（`AppConfig#cacheManager` 显式定义了 `CacheManager`，Spring Boot 的 Redis 缓存自动配置会退让） | 可保留，不影响运行 |
+| `spring.data.redis.*` | 有效：外置任务队列（Redis Stream）与熔断/限速状态都用它（`spring.data.redis.database=5`） | 必须正确配置 |
+| `spring.cache.redis.*` | **已删除（2026-10-11）**：缓存实际用 Caffeine（`AppConfig#cacheManager` 显式定义 `CacheManager`，Boot 的 Redis 缓存自动配置退让），这两行是死配置，留着会让人误以为"改配置要等 30 分钟" | 不要再加回；改库后要立即生效请调 `POST /api/admin/cache/evict` |
 | `log4j2.xml` | **未生效**：项目用 Logback（`spring-boot-starter-logging`），该文件不会被加载 | 见 §7 日志方案 |
 
 ---
@@ -466,6 +489,7 @@ sudo journalctl -u comment-collector --since today > /tmp/cc.log
 | `从 DB 恢复熔断状态` | 重启后恢复了此前的 OPEN 状态（正常，说明状态持久化生效） |
 | `insertAll 失败，退化为逐条 save` | 批量写入有 `_id` 冲突，已自动降级 |
 | `供应商调用管线已装配` | **启动时打印**，确认阶段顺序与生效的 `timeout` / 默认并发上限（管线是供应商调用的唯一边界） |
+| `Bulkhead 取许可语义: REJECT/其它=不排队立即失败; THROTTLE_QUEUE=有界排队，上限 Nms` | **启动时打印**，一眼确认 Bulkhead 是"快速失败"还是"有界排队"，以及全局排队上限（`collector.pipeline.bulkhead-max-queue-wait-ms`，`<=0` 表示不排队） |
 | `Bulkhead 额度初始化: key=… maxConcurrency=…` | 该供应商的并发上限（来自 `providers[].max_concurrency`，缺省用全局默认） |
 | `初始化限流器: key=… rate=…/s` | 该供应商的静态速率上限 |
 | `并发已达上限（在途 N，上限 M），不再排队` | Bulkhead 快速失败（HTTP 503 `PROVIDER_UNAVAILABLE`）。**属预期保护**；持续出现说明该供应商并发配置偏小或上游变慢 |
@@ -542,7 +566,10 @@ sudo systemctl start comment-collector
 | 某供应商突然不再被使用 | 查 `supplier_state` 的 `circuit_state`：`OPEN` 表示已被熔断隔离 | 正常自愈：冷却后自动半开探测恢复。若上游已修复想立即恢复，把该文档的 `circuit_state` 改为 `CLOSED` 并清空 `circuit_opened_at`，或重启服务（重启后仍会按 DB 状态恢复） |
 | 采集变慢但没报错 | 自适应限速在工作：查 `supplier_state.effective_qps` 与 `adaptive_delay_ms` | 这是**预期行为**（上游慢 → 自动降速）。持续偏低说明上游确实慢，或 `max_delay_ms` 偏低；排障时可用 `collector.ratelimit.adaptive-enabled=false` 临时隔离本机制 |
 | 某供应商被 `限流拒绝` 频繁跳过 | 有效速率已降到很低 | 若该供应商其实健康，检查是否单次耗时被内部重试放大（`latency` 是整条重试链的时长）；可调 `target_concurrency` 或 `max_delay_ms` |
-| 想"宁可排队也不要跳过" | 该供应商配 `flow_effect=THROTTLE_QUEUE` + `max_queue_wait_ms` | 适用于"慢但稳、且没有备用供应商"的场景；注意排队会占用消费者线程 |
+| 想"宁可排队也不要跳过" | 该供应商配 `flow_effect=THROTTLE_QUEUE` + `max_queue_wait_ms` | 适用于"慢但稳、且没有备用供应商"的场景；注意排队会占用消费者线程，因此实际等待被 `collector.pipeline.bulkhead-max-queue-wait-ms`（默认 5000）封顶，两处取的都是同一个 `flow_effect`/`max_queue_wait_ms` |
+| 某供应商 `adaptive_delay_ms` 突然很高（如 10s 级），之后一直快不起来 | 单次"慢成功"会把延迟一步拉高（`(旧+latency)/2`），且该值存在 Redis **无 TTL**、回降是几何收敛 | 查 `collector:ratelimit:delay:<platform>:comment:<provider>` 与 `supplier_state.avg_response_time` 判断是否真慢；按需在 `providers[]` 设 `target_concurrency` / `max_delay_ms`，想立刻恢复可 `DEL` 该 key（`adaptive-enabled=false` 可整体隔离本机制） |
+| 日志出现 `并发已达上限（在途 N，上限 M），已排队等待 Xms 仍未取得许可` | 该供应商在 `THROTTLE_QUEUE` 下排队超时 | 与"不再排队"区分：说明已按 `max_queue_wait_ms` 等待过。若同一供应商大量出现，调大 `bulkhead-max-queue-wait-ms` 只是把压力后移，优先查上游耗时或调大 `max_concurrency` |
+| 同一批任务里"子任务重投"与"排队超时"同时出现 | **先查代理池，再怀疑闸门参数**：看 `代理 … 判定失败(PROXY_HANDSHAKE)`（score 递减、冷却递增）与 `代理池刷新完成：共 N 个，可用 M 个` | 代理不可用时按 `directFallbackOnProxyFailure` 回落直连（真实 IP 出网）。2026-10-11 实测：3 个代理 score `80→20`、冷却 `30s→240s`、最终"可用 0"，使 vivo 调用反复 `单次调用超时（> 20000ms）`、在途许可被占住 → 排队 5000ms 用满 → 子任务重投补采；22 条最终仍全部成功，与闸门参数无关 |
 | 请求报 `无候选满足所需能力 [X]` | 调用方带了 `requiredCapabilities`，但没有候选全部具备 | 按日志里列出的"实际候选能力"补 DB `capabilities`，或让调用方去掉/放宽该要求。**不是故障** |
 | 启动日志有 `能力校验不一致` | DB 的 `capabilities` 与实现类注解不一致 | 按日志提示改 DB 或改代码；**只是告警不阻断启动**，但会导致路由选到不具备该能力的供应商 |
 | 单个任务报 `当前无可用供应商，请稍后重试` | 该功能下**全部**候选都被熔断或运维下线 | 查 `platform_feature_config.providers[].is_healthy` 与各供应商的 `circuit_state` |
@@ -550,6 +577,13 @@ sudo systemctl start comment-collector
 | 大量 `POST /api/tasks` 返回 **503** | 过载保护生效：`GET /api/queue/status` 看 `queueRemaining` | 正常行为（宁可拒绝也不 OOM）。持续发生则调大 `collector.task.queue-capacity` / `collector.task.consumer-threads`，或在上游限流 |
 | `queue/status` 显示 `queueSize=0` 但仍报 503 | **不是 bug**：消费者取走任务后才开始执行，在途任务同样占名额 | 看 `queueRemaining` 而非 `queueSize` |
 | 重启后任务被重复灌入，想先排查 | 问题版本可能导致每重启一次就重灌一批任务 | 先设 `collector.recovery.enabled=false` 重启，排查完再打开 |
+| 重启后日志出现 `子任务已被其它实例领取或已终态，跳过本次投递` | **正常**：恢复扫描会尝试重新提交 PENDING/RUNNING 的子任务，但只有抢到条件更新（CAS）的那个实例真正入队 | 无需处理。若短时间大量出现且并非刚重启，说明有第二个调度方在重复提交同一批子任务（查是否有另一实例仍在跑，或任务被重复创建） |
+| 改了 MongoDB 里的配置，服务却要等一会儿才生效 | 热配置走 Caffeine 本地缓存，TTL 60 秒 | 正常最迟 60s 生效；要立即生效调 `POST /api/admin/cache/evict`（`curl -X POST http://127.0.0.1:8075/comment-collector/api/admin/cache/evict`）。`collector.config.protect-writes=true` 时需带管理员密钥头 |
+| 调用 `/api/admin/cache/evict` 返回 **403** `FORBIDDEN` | `collector.config.protect-writes=true` 且未带管理员密钥 | 请求头带上 `collector.auth.admin-keys` 里的密钥（头名默认 `X-API-Key`） |
+| 任务查出来是 `PARTIAL`（不是 `COMPLETED`） | **2026-10-11 新增语义**：部分子任务成功、部分失败（`successLinks>0 && failedLinks>0`）。此前这种任务被写成 `COMPLETED`，调用方无法区分"全采到"与"采一半" | 按 `successLinks/failedLinks` 决定是否补采失败的那部分；`GET /api/tasks/{id}` 里 `batchFinished` 对 PARTIAL 也返回 true（它属于终态）。回调 body 的 `status` 同样是 `PARTIAL` |
+| 一批任务里个别链接始终失败 | 看 `sub_task.error_message`（现在会带上游原因，如 `上游 errcode=100120026 errmsg=抱歉，指定的主题不存在或已被删除或正在被审核`） | 帖子级终态（华为 `100120026`）已按"0 条成功"处理、不再重试：这类链接结果就是 `count=0`，属正常 |
+| 调大了 `collector.pipeline.timeout-threads` 但线程数没变 | 池上限是热更新（巡检周期 `collector.pipeline.timeout-threads-refresh-ms`，默认 30s） | 等一个周期，或看日志 `调用限时线程池上限热更新: N → M` 确认已应用；`timeout-threads=0` 表示按 CPU 自动（改 CPU 数仍需重启） |
+| 某主任务 `successLinks` 比 `totalLinks` 还大 | `success_links/failed_links` 是**增量计数**（每完成一个子任务 +1），不是按子任务聚合 | 正常路径不会出现；只有手工把"已计入结果"的子任务改回 `PENDING` 后重跑才会重复计数。修数据时请同步改回 `success_links`，或按 `sub_task` 重新聚合 |
 | 返回 405 / 415 且带 `REQUEST_ERROR` | HTTP 方法或 `Content-Type` 用错（框架语义已保留，不再吞成 500） | 按提示改正请求 |
 | `POST /api/collect` 指定供应商时返回 **503** `PROVIDER_UNAVAILABLE` | 看响应体的 `providerKey` 与 `reason`（`BulkheadFullException` / `ProviderTimeoutException` / `RateLimitedException` / `ProviderInvocationException`） | **可重试**。这是有意设计：候选列表路径失败是 `200+success=false`（中间件已尽力切换），点名供应商失败是 503（重试才有意义） |
 | `reason=BulkheadFullException` 频繁出现 | 该供应商在途调用已达 `providers[].max_concurrency`（默认 4） | 调大 `providers[].max_concurrency`，或降低调用方并发；**不要指望它排队** —— 排队只会把"下游慢"变成"队列长" |
@@ -558,6 +592,11 @@ sudo systemctl start comment-collector
 | 一个供应商失败会拖慢整个请求 | 每个候选都会走完整条重试链（默认 `max_retry` 2~3） | 确定性失败的供应商把 `providers[].max_retry` 配 0/1；`collector.pipeline.retry-backoff-base-ms` 可整体缩短退避 |
 | 报 `限时线程池已满` | `collector.pipeline.timeout-threads` 打满（0 = 按 CPU 自动，`max(64, CPU×8)`） | 调大该值；同时排查是否有供应商长时间挂住（超时后底层 OkHttp 请求仍会继续跑，直到其 `callTimeout` 60s） |
 | 想看某供应商到底被调用了没 | grep `熔断闸门拒绝` / `未触达供应商，跳过运行时状态上报`（DEBUG） | 前者=闸门拦截未调用；后者=保护性拒绝未计入熔断（正常） |
+| 日志出现 `Redis Stream 消费组丢失，将自动重建: reason=…` 后又有 `Redis Stream 消费者组已创建` | 正常**自愈**：组在 Redis 侧消失（`FLUSHALL`/切库/误删 key）或消费者读到 `NOGROUP` | 无需人工介入，下一个探活周期（`collector.queue.redis-probe-ms`，默认 10s）重建；重建前消息只堆在流里、不丢。若**只有丢失没有重建**，查 Redis 连接/权限 |
+| 采集"静默停摆"：接口不报错、队列却在涨 | 看是否有 `groupsReady` 失真：启动后打过 `Redis Stream 外置队列就绪`，但之后 `XLEN` 只增不减、没有 `采集开始` 日志 | 2026-10-11 前的版本会卡死在此状态（消费组不重建）；升级后由探活回验自动修复。仍不恢复时 `DEL collector:tasks:high collector:tasks:low` 触发一次丢失→重建 |
+| 日志出现 `子任务已是终态，放弃重投` / `子任务已被其它实例领取或已终态，跳过本次重投` | 状态条件更新（CAS）挡住了重复重投 | **正常**：说明该子任务已被别的实例处理或已终态，不再重复入队。若某子任务**长期**只看到这两行、始终不推进，查它是否已 `SUCCESS/FAILED`，或是否两个实例都在抢 |
+| `supplier_state.effective_qps` 为 0 但采集正常 | 管线/限流阶段未执行（`collector.pipeline.enabled=false` 或该阶段关闭） | 0 表示"本进程没测到静态速率"，**不是**"被限速到 0"；修复后代码不再把 0 落库，历史脏值可手工清成期望值 |
+| 某平台停了很久，重新上线后速率仍然很慢 | 旧的 `adaptive_delay_ms` 被继承（`collector:ratelimit:delay:*` 原先无 TTL） | 已加 `collector.ratelimit.key-ttl-seconds`（默认 86400）自然淘汰；想立刻恢复：`DEL collector:ratelimit:delay:<platform>:comment:<provider>` |
 
 ---
 

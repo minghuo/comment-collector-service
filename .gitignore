@@ -1,0 +1,43 @@
+HELP.md
+target/
+.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+build/
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+### VS Code ###
+.vscode/
+
+### 本机构建辅助（沙箱内 Maven 默认仓库不可写，指向工作区内仓库） ###
+.mvn-repo/
+.mvn-settings.xml
+
+### 本地调试工具（node_modules / npm 缓存 / 无 mongosh 时的替代运行器） ###
+.tools/
+
+### ZCode 会话本地文件 ###
+.zcode/
