@@ -120,7 +120,11 @@ public final class LinkPlatformRouter {
                     Set.of(Capability.LOGIN_STATE), Set.of(),  // 有 cookie → 走本地采集
                     WEIBO_STATUS_URL,
                     Set.of(), Set.of(Capability.LOGIN_STATE)), // 无 cookie → 只走 Golaxy，且视频链接不支持
-            rule("B站", "bilibili", "comment", BILI_URL),
+            // B站：local（bilibili_local，依赖 cookie）与 golaxy（bilibili_golaxy）双供应商，链接范围相同
+            new RouteRule("B站", "bilibili", "comment", BILI_URL,
+                    Set.of(Capability.LOGIN_STATE), Set.of(),  // 有 cookie → 走本地采集
+                    BILI_URL,
+                    Set.of(), Set.of(Capability.LOGIN_STATE)), // 无 cookie → 只走 Golaxy
             rule("Twitter", "twitter", "comment", TWITTER_URL),
             rule("Facebook", "facebook", "comment", FACEBOOK_URL),
             rule("YouTube", "youtube", "comment", YOUTUBE_URL)

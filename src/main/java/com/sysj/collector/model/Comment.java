@@ -458,6 +458,38 @@ public class Comment {
     }
 
     /**
+     * 从 B站本地接口（api.bilibili.com/x/v2/reply/wbi/main 与 reply/reply）返回的单条 JSON 构建 Comment。
+     *
+     * <p>字段映射与 auto-task-web 的 {@code CommentsFactory.biliLocal} 一致。
+     * {@code mid} 取评论区 oid（落库业务主键即 {@code taskId-{oid}-{rpid}}，
+     * 与 auto-task-web 的 taskId+oid+rpid 规则一致）；oid/type 为 B站特有维度，放 {@link #extra}。
+     * 注意 {@code ctime} 是<b>秒级</b>时间戳，需要 ×1000。
+     */
+    public static Comment buildFromBiliLocal(String dataStr) {
+        Long timeLong = CommonTools.stringToLong(CommonParser.getJsonPathOne(dataStr, "$.ctime"));
+        String oid = CommonParser.getJsonPathOne(dataStr, "$.oid");
+        Map<String, Object> extra = new HashMap<>();
+        extra.put("oid", oid);
+        extra.put("type", CommonParser.getJsonPathOne(dataStr, "$.type"));
+        return Comment.builder()
+                .commentId(CommonParser.getJsonPathOne(dataStr, "$.rpid"))
+                .mid(oid)
+                .uid(CommonParser.getJsonPathOne(dataStr, "$.member.mid"))
+                .userName(CommonParser.getJsonPathOne(dataStr, "$.member.uname"))
+                .text(CommonParser.getJsonPathOne(dataStr, "$.content.message"))
+                .time(timeLong != null && timeLong > 0
+                        ? TimeParser.dateFormatString(new Date(timeLong * 1000L)) : null)
+                .likeCount(CommonTools.stringToInteger(CommonParser.getJsonPathOne(dataStr, "$.like")))
+                .parentCommentId(CommonParser.getJsonPathOne(dataStr, "$.root"))
+                .replyCount(CommonTools.stringToInteger(CommonParser.getJsonPathOne(dataStr, "$.rcount")))
+                .ipLocation(CommonParser.getJsonPathOne(dataStr, "$.reply_control.location"))
+                .gender(CommonParser.getJsonPathOne(dataStr, "$.member.sex"))
+                .extra(extra)
+                .insertTime(System.currentTimeMillis())
+                .build();
+    }
+
+    /**
      * 从星光（XG）渠道评论接口返回的单条 JSON 构建 Comment。
      *
      * <p>Twitter/Facebook/YouTube 三平台共用同一 JSON 结构，字段映射与 auto-task-web 的

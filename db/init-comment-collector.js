@@ -98,7 +98,9 @@ const FEATURE_CONFIGS = [
     feature_code: 'comment',
     feature_name: 'B站评论采集',
     providers: [
-      { provider_key: 'bilibili_golaxy', name: 'B站-中科天玑接口', rate_per_second: 1.0, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 15000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
+      // 中科天玑渠道（免登录）；本地 wbi 签名采集作为 cookie 场景的补充（LOGIN_STATE）
+      { provider_key: 'bilibili_golaxy', name: 'B站-中科天玑接口', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
+      { provider_key: 'bilibili_local', name: 'B站-本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 20, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','LOGIN_STATE','SYNC_SUPPORTED'] },
     ],
   },
   {

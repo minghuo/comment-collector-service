@@ -57,13 +57,28 @@ class LinkPlatformRouterTest {
 
     @Test
     void singleVersionPlatformsIgnoreCookie() {
-        assertRoute("bilibili", BILI_VIDEO, true);
-        assertRoute("bilibili", BILI_VIDEO, false);
         assertRoute("xhs", XHS_NOTE, false);
         assertRoute("douyin", DOUYIN_VIDEO, false);
         assertRoute("toutiao", TOUTIAO_POST, true);
         assertRoute("wechat_video", "https://channels.weixin.qq.com/web/pages/feed?eid=EqVqHk", false);
         assertRoute("wechat", "https://mp.weixin.qq.com/s/AbC-123xyz", true);
+    }
+
+    @Test
+    void biliWithCookieRequiresLoginState() {
+        // B站与微博同为双版本平台：有 cookie → 本地爬虫（LOGIN_STATE），无 cookie → Golaxy
+        LinkPlatformRouter.Route route = LinkPlatformRouter.route(BILI_VIDEO, true);
+        assertEquals("bilibili", route.platformCode());
+        assertEquals(List.of(Capability.LOGIN_STATE), route.requiredCapabilities());
+        assertTrue(route.excludedCapabilities().isEmpty());
+    }
+
+    @Test
+    void biliWithoutCookieExcludesLoginState() {
+        LinkPlatformRouter.Route route = LinkPlatformRouter.route(BILI_VIDEO, false);
+        assertEquals("bilibili", route.platformCode());
+        assertTrue(route.requiredCapabilities().isEmpty());
+        assertEquals(List.of(Capability.LOGIN_STATE), route.excludedCapabilities());
     }
 
     @Test
