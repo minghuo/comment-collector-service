@@ -29,6 +29,10 @@ public final class CommentDataType {
     public static final String OPPO_BBS_COMMENT = "oppo_bbs_comment";
     public static final String VIVO_BBS_COMMENT = "vivo_bbs_comment";
     public static final String XIAOMI_BBS_COMMENT = "xiaomi_bbs_comment";
+    // 星光渠道（对照 auto-task-web 的 commentType 枚举 TWITTER/FACEBOOK/YOUTUBE）
+    public static final String TWITTER_COMMENT = "twitter_comment";
+    public static final String FACEBOOK_COMMENT = "facebook_comment";
+    public static final String YOUTUBE_COMMENT = "youtube_comment";
 
     /**
      * 由平台编码 + 功能编码推断默认数据类型。
@@ -75,6 +79,15 @@ public final class CommentDataType {
         }
         if ("xiaomi_bbs".equalsIgnoreCase(platformCode)) {
             return XIAOMI_BBS_COMMENT;
+        }
+        if ("twitter".equalsIgnoreCase(platformCode)) {
+            return TWITTER_COMMENT;
+        }
+        if ("facebook".equalsIgnoreCase(platformCode)) {
+            return FACEBOOK_COMMENT;
+        }
+        if ("youtube".equalsIgnoreCase(platformCode)) {
+            return YOUTUBE_COMMENT;
         }
         // 未登记的平台：退化为平台名 + 功能名，保证仍有可读的判别值
         return platformCode + "_" + (featureCode == null ? "comment" : featureCode);

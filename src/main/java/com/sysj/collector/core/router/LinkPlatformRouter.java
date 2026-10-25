@@ -81,6 +81,15 @@ public final class LinkPlatformRouter {
     private static final Predicate<String> XIAOMI_URL = url ->
             url.contains("miui.com") || url.contains("mi.com");
 
+    // ── 星光渠道（海外三平台，域名包含规则与 auto-task-web 的 CommentUrlRouter 一致） ──
+
+    private static final Predicate<String> TWITTER_URL = url ->
+            url.contains("twitter.com") || url.contains("x.com");
+    private static final Predicate<String> FACEBOOK_URL = url ->
+            url.contains("facebook.com") || url.contains("fb.com");
+    private static final Predicate<String> YOUTUBE_URL = url ->
+            url.contains("youtube.com") || url.contains("youtu.be");
+
     /** 单条路由规则：无能力约束的普通平台。 */
     private static RouteRule rule(String platformName, String platformCode, String featureCode,
                                   Predicate<String> matcher) {
@@ -90,8 +99,9 @@ public final class LinkPlatformRouter {
     /**
      * 路由规则表：顺序敏感，前一条命中即返回。
      *
-     * <p>只有本服务已接入的平台（providerKey 见接口文档 §2.1）才会出现在这里；
-     * auto-task-web 还覆盖荣耀/华为/OPPO/vivo/小米社区、贴吧与海外三平台，本服务暂未接入，不列出。
+     * <p>只有本服务已接入的平台（providerKey 见接口文档 §2.1）才会出现在这里。
+     * 注意 {@code x.com} / {@code fb.com} 是宽松的域名包含匹配（与 auto-task-web 保持一致），
+     * 因此放在规则表末尾，避免误截其它包含该子串的域名。
      */
     private static final List<RouteRule> RULES = List.of(
             rule("微信视频号", "wechat_video", "comment", WECHAT_VIDEO_URL),
@@ -110,7 +120,10 @@ public final class LinkPlatformRouter {
                     Set.of(Capability.LOGIN_STATE), Set.of(),  // 有 cookie → 走本地采集
                     WEIBO_STATUS_URL,
                     Set.of(), Set.of(Capability.LOGIN_STATE)), // 无 cookie → 只走 Golaxy，且视频链接不支持
-            rule("B站", "bilibili", "comment", BILI_URL)
+            rule("B站", "bilibili", "comment", BILI_URL),
+            rule("Twitter", "twitter", "comment", TWITTER_URL),
+            rule("Facebook", "facebook", "comment", FACEBOOK_URL),
+            rule("YouTube", "youtube", "comment", YOUTUBE_URL)
     );
 
     /**

@@ -179,6 +179,31 @@ const FEATURE_CONFIGS = [
       { provider_key: 'xiaomi_bbs_local', name: '小米社区-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, target_concurrency: 3, max_delay_ms: 5000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
     ],
   },
+  // ── 星光（XG）渠道：海外三平台，同一外部服务（dataapi.supinfor.com），token 走 query，无翻页一次拉全 ──
+  {
+    platform_code: 'twitter',
+    feature_code: 'comment',
+    feature_name: 'Twitter评论采集',
+    providers: [
+      { provider_key: 'xg_twitter', name: 'Twitter-星光渠道', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SYNC_SUPPORTED'] },
+    ],
+  },
+  {
+    platform_code: 'facebook',
+    feature_code: 'comment',
+    feature_name: 'Facebook评论采集',
+    providers: [
+      { provider_key: 'xg_facebook', name: 'Facebook-星光渠道', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SYNC_SUPPORTED'] },
+    ],
+  },
+  {
+    platform_code: 'youtube',
+    feature_code: 'comment',
+    feature_name: 'YouTube评论采集',
+    providers: [
+      { provider_key: 'xg_youtube', name: 'YouTube-星光渠道', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SYNC_SUPPORTED'] },
+    ],
+  },
 ];
 
 /**

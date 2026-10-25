@@ -458,6 +458,66 @@ public class Comment {
     }
 
     /**
+     * 从星光（XG）渠道评论接口返回的单条 JSON 构建 Comment。
+     *
+     * <p>Twitter/Facebook/YouTube 三平台共用同一 JSON 结构，字段映射与 auto-task-web 的
+     * {@code CommentsFactory.xg} 一致。注意：
+     * <ul>
+     *   <li>{@code ctime} 是<b>秒级</b>时间戳，需要 ×1000；</li>
+     *   <li>{@code pid} 是"原帖/父级评论"混合语义（顶层评论也会带原帖 ID），<b>不能</b>映射到
+     *       parentCommentId（否则全部评论会被误判为回复），放 {@code extra.pid} 保留原义；</li>
+     *   <li>星光特有字段（访问数/收藏数/语言/用户扩展/转发四件套等）统一放 {@link #extra}，
+     *       键名与 auto-task-web 的 XgComments 字段一致，便于调用方还原。</li>
+     * </ul>
+     */
+    public static Comment buildFromXg(String dataStr) {
+        Long timeLong = CommonTools.stringToLong(CommonParser.getJsonPathOne(dataStr, "$.ctime"));
+        Map<String, Object> extra = new HashMap<>();
+        extra.put("pid", CommonParser.getJsonPathOne(dataStr, "$.pid"));
+        extra.put("visitCount", CommonTools.stringToInteger(CommonParser.getJsonPathOne(dataStr, "$.visit_count")));
+        extra.put("collectionCount", CommonTools.stringToInteger(CommonParser.getJsonPathOne(dataStr, "$.collection_count")));
+        extra.put("langCode", CommonParser.getJsonPathOne(dataStr, "$.lang_code"));
+        extra.put("wtype", CommonTools.stringToInteger(CommonParser.getJsonPathOne(dataStr, "$.wtype")));
+        List<String> locationList = CommonParser.getJsonPathMany(dataStr, "$.user.location");
+        if (locationList != null && !locationList.isEmpty()) {
+            extra.put("userLocation", locationList.stream()
+                    .filter(StringUtils::isNotBlank)
+                    .reduce((a, b) -> a + "," + b)
+                    .orElse(null));
+        }
+        String retweetedStr = CommonParser.getJsonPathOne(dataStr, "$.retweeted");
+        if (StringUtils.isNotBlank(retweetedStr) && !"null".equals(retweetedStr)) {
+            extra.put("retweetUrl", CommonParser.getJsonPathOne(dataStr, "$.retweeted.url"));
+            extra.put("retweetMid", CommonParser.getJsonPathOne(dataStr, "$.retweeted.mid"));
+            extra.put("retweetUid", CommonParser.getJsonPathOne(dataStr, "$.retweeted.user.uid"));
+            extra.put("retweetName", CommonParser.getJsonPathOne(dataStr, "$.retweeted.user.name"));
+        }
+        extra.put("nickname", CommonParser.getJsonPathOne(dataStr, "$.user.nickname"));
+        extra.put("profileImgUrl", CommonParser.getJsonPathOne(dataStr, "$.user.profile_img_url"));
+        extra.put("verified", CommonTools.stringToInteger(CommonParser.getJsonPathOne(dataStr, "$.user.verified")));
+        // followCount/fansCount 是原始类型，user 段缺失时 stringToLong 返回 null 会拆箱 NPE，兜底 0
+        Long friendsCount = CommonTools.stringToLong(CommonParser.getJsonPathOne(dataStr, "$.user.friends_count"));
+        Long followersCount = CommonTools.stringToLong(CommonParser.getJsonPathOne(dataStr, "$.user.followers_count"));
+        Integer statusesCount = CommonTools.stringToInteger(CommonParser.getJsonPathOne(dataStr, "$.user.statuses_count"));
+        return Comment.builder()
+                .commentId(CommonParser.getJsonPathOne(dataStr, "$.mid"))
+                .uid(CommonParser.getJsonPathOne(dataStr, "$.user.uid"))
+                .userName(CommonParser.getJsonPathOne(dataStr, "$.user.name"))
+                .time(timeLong != null && timeLong > 0 ? TimeParser.dateFormatString(new Date(timeLong * 1000)) : null)
+                .text(CommonParser.getJsonPathOne(dataStr, "$.content"))
+                .likeCount(CommonTools.stringToInteger(CommonParser.getJsonPathOne(dataStr, "$.like_count")))
+                .replyCount(CommonTools.stringToInteger(CommonParser.getJsonPathOne(dataStr, "$.reply_count")))
+                .repostCount(CommonTools.stringToInteger(CommonParser.getJsonPathOne(dataStr, "$.repost_count")))
+                .followCount(friendsCount == null ? 0L : friendsCount)
+                .fansCount(followersCount == null ? 0L : followersCount)
+                .statusCount(statusesCount == null ? 0 : statusesCount)
+                .description(CommonParser.getJsonPathOne(dataStr, "$.user.description"))
+                .extra(extra)
+                .insertTime(System.currentTimeMillis())
+                .build();
+    }
+
+    /**
      * 从今日头条评论接口返回的单条 JSON 构建 Comment。
      *
      * <p>字段映射与 auto-task-web 的 {@code TtComment.build} 一致。
