@@ -66,7 +66,8 @@ const FEATURE_CONFIGS = [
       // 中科天玑（Golaxy）微博评论接口（无需 Cookie）
       { provider_key: 'weibo_official', name: '微博-中科天玑接口', rate_per_second: 1.0, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 15000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
       // 微博网页版本地爬虫（需要在 requestParams 里传 cookie）
-      { provider_key: 'local_crawler', name: '微博-本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 20, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','CURSOR_PAGING','LOGIN_STATE','PROXY','SYNC_SUPPORTED'] },
+      // THROTTLE_QUEUE：自动翻页页间密集，REJECT 会立即失败并计入熔断形成恶性循环（与 B站本地一致）
+      { provider_key: 'local_crawler', name: '微博-本地爬虫', rate_per_second: 1.0, max_retry: 2, priority: 20, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','CURSOR_PAGING','LOGIN_STATE','PROXY','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -74,7 +75,7 @@ const FEATURE_CONFIGS = [
     feature_code: 'repost',
     feature_name: '微博转发采集',
     providers: [
-      { provider_key: 'weibo_repost_local', name: '微博-转发本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','PAGE_PAGING','CURSOR_PAGING','LOGIN_STATE','PROXY','SYNC_SUPPORTED'] },
+      { provider_key: 'weibo_repost_local', name: '微博-转发本地爬虫', rate_per_second: 1.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','PAGE_PAGING','CURSOR_PAGING','LOGIN_STATE','PROXY','SYNC_SUPPORTED'] },
     ],
   },
   {

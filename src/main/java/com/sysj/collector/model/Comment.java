@@ -372,8 +372,9 @@ public class Comment {
                 .verifyInfo(CommonParser.getJsonPathOne(dataStr, "$.user.verified_reason"))
                 .bigfans(StringUtils.isNotBlank(fansName) && fansName.contains("loyal_fans") ? "1" : "0")
                 .text(CommonParser.getJsonPathOne(dataStr, "$.text_raw"))
-                .time(TimeParser.dateFormatString(new Date(CommonTools.stringToLong(
-                        CommonParser.getJsonPathOne(dataStr, "$.created_at")))))
+                // created_at 是英文格式日期串（如 Sat Oct 25 21:40:34 +0800 2026），
+                // stringToLong 解析不了会得 0（落库 1970-01-01），须用 Date(String) 解析（与 auto-task-web 一致）
+                .time(TimeParser.dateFormatString(new Date(CommonParser.getJsonPathOne(dataStr, "$.created_at"))))
                 .source(CommonParser.getJsonPathOne(dataStr, "$.source"))
                 .replyCount(CommonTools.stringToInteger(CommonParser.getJsonPathOne(dataStr, "$.total_number")))
                 .likeCount(CommonTools.stringToInteger(CommonParser.getJsonPathOne(dataStr, "$.like_counts")))
@@ -400,8 +401,8 @@ public class Comment {
                 .uid(uid)
                 .userName(CommonParser.getJsonPathOne(dataStr, "$.user.screen_name"))
                 .text(CommonParser.getJsonPathOne(dataStr, "$.text_raw"))
-                .time(TimeParser.dateFormatString(new Date(CommonTools.stringToLong(
-                        CommonParser.getJsonPathOne(dataStr, "$.created_at")))))
+                // created_at 是英文格式日期串，用 Date(String) 解析（同 buildFromWeiboLocal 的修复）
+                .time(TimeParser.dateFormatString(new Date(CommonParser.getJsonPathOne(dataStr, "$.created_at"))))
                 .source(StringUtils.isNotBlank(sourceStr) ? CommonParser.getXpathOne(sourceStr, "//a") : null)
                 .ipLocation(ipLocation)
                 .repostUrl(StringUtils.isNotBlank(uid) && StringUtils.isNotBlank(mblogid)
