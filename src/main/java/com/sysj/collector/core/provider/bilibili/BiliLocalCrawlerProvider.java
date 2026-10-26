@@ -9,6 +9,7 @@ import com.sysj.collector.core.provider.CommentProvider;
 import com.sysj.collector.core.provider.ProviderCapability;
 import com.sysj.collector.core.provider.ProviderMeta;
 import com.sysj.collector.core.provider.support.HttpUtilProvider;
+import com.sysj.collector.core.provider.support.ProviderUrls;
 import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommonEntity;
@@ -114,18 +115,16 @@ public class BiliLocalCrawlerProvider implements CommentProvider {
                                             String sort, String next) {
         String effectiveSort = StringUtils.defaultIfBlank(sort, "2");
         if (StringUtils.isBlank(next)) {
-            // 首轮：解析 oid/type
-            String resolvedType = StringUtils.defaultIfBlank(type, "1");
-            String resolvedOid = mid;
-            if (StringUtils.isBlank(resolvedOid)) {
-                Map<String, String> target = resolveTargetFromUrl(fromUrl, cookie);
-                resolvedOid = target.get("oid");
-                resolvedType = StringUtils.defaultIfBlank(target.get("type"), "1");
-            }
-            if (StringUtils.isBlank(resolvedOid) || StringUtils.isBlank(resolvedType)) {
+            // 首轮解析评论区 oid/type。wbi 主评论接口要求 oid 为数字 aid：
+            // BV 号/动态 ID/链接都不能直接用（历史缺陷：oid=BV 号时上游返回空数据）。
+            // 优先按 fromUrl（任务原始链接）解析；mid 可能是调用方透传的链接或 BV 号，仅作 fromUrl 缺失时的候选
+            Map<String, String> target = resolveTarget(fromUrl, mid, cookie);
+            String resolvedOid = target.get("oid");
+            String resolvedType = StringUtils.defaultIfBlank(target.get("type"), StringUtils.defaultIfBlank(type, "1"));
+            if (StringUtils.isBlank(resolvedOid) || !resolvedOid.matches("\\d+")) {
                 return CommonEntity.<Comment>builder().haseMore(false)
                         .status(CommonStatusEnum.STATUS_URL_ERROR)
-                        .msg("无法从链接解析 B 站评论区 oid（支持 av/BV/opus/动态链接）").build();
+                        .msg("无法解析 B 站评论区 oid（支持 av/BV/opus/动态链接，oid 须为数字 aid）").build();
             }
             next = "mode=" + effectiveSort + "&oid=" + resolvedOid
                     + "&pagination_str=%7B%22offset%22%3A%22%22%7D&plat=1&seek_rpid=&type=" + resolvedType
@@ -183,8 +182,10 @@ public class BiliLocalCrawlerProvider implements CommentProvider {
         String cursorStr = CommonParser.getJsonPathOne(result, "$.data.cursor");
         boolean hasMore = "false".equals(CommonParser.getJsonPathOne(cursorStr, "$.is_end"));
         String nextOffset = CommonParser.getJsonPathOne(cursorStr, "$.pagination_reply.next_offset");
-        if (StringUtils.isNotBlank(nextOffset) && nextOffset.contains("=")) {
-            nextOffset = nextOffset.replace("=", "%3D");
+        if (StringUtils.isNotBlank(nextOffset)) {
+            // base64 游标可含 = / + 等字符，必须整体 URL 编码后再拼 query：只编码 =
+            // （auto-task-web 原实现的写法）在深页游标含 / 或 + 时会被 B站 wbi 校验拒绝（-403 访问权限不足）
+            nextOffset = ProviderUrls.encodeParam(nextOffset);
         }
         // 从当前参数串继承 mode/oid/type，仅替换 pagination_str 的 offset
         String nextData = next.replaceFirst(
@@ -268,18 +269,16 @@ public class BiliLocalCrawlerProvider implements CommentProvider {
         return page != null && page > 0 ? page : 1;
     }
 
-    /** 显式 mid 优先，其次链接末段（BV 号等），供调用方已解析的场景复用 */
+    /** 显式 mid 优先（仅当已是数字 aid 时才直接采用），其次链接末段（BV 号等），供调用方已解析的场景复用 */
     private static String resolveOid(String explicitMid, String url, String targetId) {
-        if (StringUtils.isNotBlank(explicitMid)) {
+        if (StringUtils.isNotBlank(explicitMid) && explicitMid.matches("\\d+")) {
             return explicitMid;
         }
-        if (StringUtils.isNotBlank(targetId)) {
-            return targetId;
-        }
-        if (StringUtils.isBlank(url)) {
+        String candidate = StringUtils.isNotBlank(url) ? url : targetId;
+        if (StringUtils.isBlank(candidate)) {
             return null;
         }
-        String clean = url.split("\\?")[0].replace("#ocr", "");
+        String clean = candidate.split("\\?")[0].replace("#ocr", "");
         if (clean.contains("video/av")) {
             return clean.split("video/av")[1].replace("/", "");
         }
@@ -294,6 +293,86 @@ public class BiliLocalCrawlerProvider implements CommentProvider {
             return parts.length > 1 ? parts[1] : null;
         }
         return null;
+    }
+
+    /**
+     * 解析评论区目标（oid=数字 aid + type）：优先原始链接，缺失时回退调用方透传的 mid
+     * （可能是链接或 BV 号）。BV 号经 view 接口换算 aid；动态 ID 经 dynamic-detail 换算
+     * comment_id_str（对照 auto-task-web 的 BiliVideoInfoCrawler.getCommentId）。
+     */
+    private Map<String, String> resolveTarget(String fromUrl, String mid, String cookie) {
+        // av 链接 / 纯数字 mid：直接就是 oid
+        if (StringUtils.isNotBlank(fromUrl) && fromUrl.split("\\?")[0].contains("video/av")) {
+            return resolveTargetFromUrl(fromUrl, cookie);
+        }
+        if (StringUtils.isNotBlank(mid) && mid.matches("\\d+")
+                && (StringUtils.isBlank(fromUrl) || fromUrl.split("\\?")[0].contains("video/"))) {
+            Map<String, String> direct = new HashMap<>();
+            direct.put("oid", mid);
+            direct.put("type", "1");
+            return direct;
+        }
+        String urlCandidate = StringUtils.isNotBlank(fromUrl)
+                ? fromUrl : (StringUtils.startsWith(mid, "http") ? mid : null);
+        if (StringUtils.isNotBlank(urlCandidate)) {
+            Map<String, String> target = resolveTargetFromUrl(urlCandidate, cookie);
+            if (StringUtils.isNotBlank(target.get("oid"))) {
+                return target;
+            }
+        }
+        // mid 是裸 BV 号（无链接形态）：直接换算
+        if (StringUtils.isNotBlank(mid) && mid.contains("BV")) {
+            return fetchViewAid(mid, cookie);
+        }
+        // 动态 ID（纯数字但来自 t.bilibili.com 语境）：按动态详情换算
+        if (StringUtils.isNotBlank(mid) && mid.matches("\\d+")) {
+            return fetchDynamicCommentId(mid, cookie);
+        }
+        return new HashMap<>();
+    }
+
+    /** BV 号 → aid（view 接口） */
+    private Map<String, String> fetchViewAid(String bvid, String cookie) {
+        Map<String, String> result = new HashMap<>();
+        Map<String, String> headers = new HashMap<>();
+        headers.put("User-Agent", USER_AGENT);
+        if (StringUtils.isNotBlank(cookie)) {
+            headers.put("cookie", cookie);
+        }
+        try {
+            String body = httpUtil.getString(
+                    "https://api.bilibili.com/x/web-interface/view?bvid=" + bvid, headers);
+            if (StringUtils.isNotBlank(body) && body.contains("aid")) {
+                result.put("oid", CommonParser.getJsonPathOne(body, "$.data.aid"));
+                result.put("type", "1");
+            }
+        } catch (Exception e) {
+            log.warn("[bili-local] BV 换算 aid 失败: bvid={}, {}", bvid, e.getMessage());
+        }
+        return result;
+    }
+
+    /** 动态 ID → comment_id_str/comment_type（dynamic-detail 接口） */
+    private Map<String, String> fetchDynamicCommentId(String dynamicId, String cookie) {
+        Map<String, String> result = new HashMap<>();
+        Map<String, String> headers = new HashMap<>();
+        headers.put("User-Agent", USER_AGENT);
+        headers.put("origin", "https://t.bilibili.com");
+        headers.put("referer", "https://t.bilibili.com/1170006394898743336");
+        if (StringUtils.isNotBlank(cookie)) {
+            headers.put("cookie", cookie);
+        }
+        try {
+            String body = httpUtil.getString("https://api.bilibili.com/x/polymer/web-dynamic/v1/detail?platform=web"
+                    + "&gaia_source=main_web&id=" + dynamicId, headers);
+            if (StringUtils.isNotBlank(body) && body.contains("comment_id_str")) {
+                result.put("oid", CommonParser.getJsonPathOne(body, "$.data.item.basic.comment_id_str"));
+                result.put("type", CommonParser.getJsonPathOne(body, "$.data.item.basic.comment_type"));
+            }
+        } catch (Exception e) {
+            log.warn("[bili-local] 动态换算 comment_id 失败: id={}, {}", dynamicId, e.getMessage());
+        }
+        return result;
     }
 
     /**
@@ -315,32 +394,9 @@ public class BiliLocalCrawlerProvider implements CommentProvider {
         if (StringUtils.isBlank(mid)) {
             return result;
         }
-        Map<String, String> headers = new HashMap<>();
-        headers.put("User-Agent", USER_AGENT);
-        if (StringUtils.isNotBlank(cookie)) {
-            headers.put("cookie", cookie);
+        if (mid.contains("BV")) {
+            return fetchViewAid(mid, cookie);
         }
-        try {
-            String body;
-            if (mid.contains("BV")) {
-                body = httpUtil.getString("https://api.bilibili.com/x/web-interface/view?bvid=" + mid, headers);
-                if (StringUtils.isNotBlank(body) && body.contains("aid")) {
-                    result.put("oid", CommonParser.getJsonPathOne(body, "$.data.aid"));
-                    result.put("type", "1");
-                }
-            } else {
-                headers.put("origin", "https://t.bilibili.com");
-                headers.put("referer", "https://t.bilibili.com/1170006394898743336");
-                body = httpUtil.getString("https://api.bilibili.com/x/polymer/web-dynamic/v1/detail?platform=web"
-                        + "&gaia_source=main_web&id=" + mid, headers);
-                if (StringUtils.isNotBlank(body) && body.contains("comment_id_str")) {
-                    result.put("oid", CommonParser.getJsonPathOne(body, "$.data.item.basic.comment_id_str"));
-                    result.put("type", CommonParser.getJsonPathOne(body, "$.data.item.basic.comment_type"));
-                }
-            }
-        } catch (Exception e) {
-            log.warn("[bili-local] 链接解析 oid 失败: url={}, {}", url, e.getMessage());
-        }
-        return result;
+        return fetchDynamicCommentId(mid, cookie);
     }
 }

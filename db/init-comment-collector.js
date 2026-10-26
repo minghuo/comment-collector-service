@@ -100,7 +100,9 @@ const FEATURE_CONFIGS = [
     providers: [
       // 中科天玑渠道（免登录）；本地 wbi 签名采集作为 cookie 场景的补充（LOGIN_STATE）
       { provider_key: 'bilibili_golaxy', name: 'B站-中科天玑接口', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
-      { provider_key: 'bilibili_local', name: 'B站-本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 20, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','LOGIN_STATE','SYNC_SUPPORTED'] },
+      // flow_effect=THROTTLE_QUEUE：自动翻页续采间隔密集（页间仅秒级），REJECT 会立即失败并计入
+      // 熔断统计形成恶性循环；排队等令牌（最多 30s）与其它本地爬虫供应商的惯例一致
+      { provider_key: 'bilibili_local', name: 'B站-本地爬虫', rate_per_second: 1.0, max_retry: 2, priority: 20, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','LOGIN_STATE','SYNC_SUPPORTED'] },
     ],
   },
   {

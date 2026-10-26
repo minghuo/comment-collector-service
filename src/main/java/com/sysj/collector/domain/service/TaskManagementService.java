@@ -373,6 +373,10 @@ public class TaskManagementService implements TaskResultListener {
                 .subTaskId(subTask.getId())
                 .userId(masterTask.getUserId())
                 .userTierCode(masterTask.getUserTierCode())
+                // 主任务带供应商约束（如微博/B站指定 local）时，全部子任务含自动翻页续采都必须
+                // 继承：不继承会退回按 priority 路由（golaxy 先试白白失败、污染熔断与限流统计，
+                // local 被限流时还会切到不满足任务语义的供应商）
+                .specifiedProviderKey(masterTask.getSupplierConstraint())
                 .requiredCapabilities(masterTask.getRequiredCapabilities())
                 .excludedCapabilities(masterTask.getExcludedCapabilities())
                 .extra(extra)
