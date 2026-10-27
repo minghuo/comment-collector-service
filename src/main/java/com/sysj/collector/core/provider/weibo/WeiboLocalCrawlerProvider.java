@@ -41,7 +41,9 @@ import java.util.Map;
  *   <li>{@code cookie} —— 微博登录 Cookie，<b>必填</b>（同时用于提取 XSRF-TOKEN）</li>
  *   <li>{@code sort} —— 排序：{@code hot}（默认）/ {@code time}</li>
  *   <li>{@code maxId} —— 上一页返回的游标，首次不传</li>
- *   <li>{@code replay} —— {@code 1}/{@code true} 时采二级评论（作为父评论 id 归属）</li>
+ *   <li>{@code replay} —— {@code 1}/{@code true} 时采二级评论，<b>必须同时传 {@code commentId}</b>（父评论 id）；
+ *       缺 {@code commentId} 时降级为一级评论并打 WARN 日志</li>
+ *   <li>{@code commentId} —— 父评论 id，仅二级评论使用（replay 时作为接口的 {@code id} 参数）</li>
  * </ul>
  *
  * <h3>链接形态（2026-10-26 增补，由 {@link WeiboUrlParser} 分派）</h3>
@@ -213,7 +215,13 @@ public class WeiboLocalCrawlerProvider implements CommentProvider {
         String cookie = extra.get("cookie");
         String sort = StringUtils.defaultIfBlank(extra.get("sort"), "hot");
         String maxId = extra.get("maxId");
-        boolean replay = "1".equals(extra.get("replay")) || "true".equalsIgnoreCase(extra.get("replay"));
+        boolean replayRequested = "1".equals(extra.get("replay")) || "true".equalsIgnoreCase(extra.get("replay"));
+        // 二级评论必须指定父评论 id：replay 时 buildComments 的 id 参数是「父评论 id」，
+        // 若误传微博 mid 会命中不存在的评论 → data 为空且 max_id=0，调用方只看到「成功 0 条」。
+        String parentCommentId = replayRequested ? StringUtils.trimToNull(extra.get("commentId")) : null;
+        if (replayRequested && parentCommentId == null) {
+            log.warn("[weibo-local] replay 缺少 extra.commentId，按一级评论采集: mid={}", mid);
+        }
 
         if (StringUtils.isBlank(mid)) {
             throw new CollectorException("微博评论采集缺少 mid（extra.mid 或 targetId 至少提供一个）");
@@ -221,17 +229,18 @@ public class WeiboLocalCrawlerProvider implements CommentProvider {
         if (StringUtils.isBlank(cookie)) {
             throw new CollectorException("微博评论采集缺少 Cookie（extra.cookie），微博接口必须登录态");
         }
-        log.info("[weibo-local] 评论采集: mid={} uid={} sort={} maxId={} replay={}", mid, uid, sort, maxId, replay);
+        log.info("[weibo-local] 评论采集: mid={} uid={} sort={} maxId={} parentCommentId={}", mid, uid, sort, maxId, parentCommentId);
 
-        int isMix = replay ? 1 : 0;
-        int fetchLevel = replay ? 1 : 0;
-        String parentCommentId = replay ? mid : null;
+        int isMix = parentCommentId != null ? 1 : 0;
+        int fetchLevel = parentCommentId != null ? 1 : 0;
+        // 二级评论时 id 是父评论 id；一级评论时 id 是微博 mid
+        String idParam = parentCommentId != null ? parentCommentId : mid;
 
         // 修 R8：sort/mid/uid/maxId 都来自调用方 extra，必须编码后拼 query
         // （isMix/fetchLevel 是本类算出的 int，无需编码）
         StringBuilder apiUrl = new StringBuilder(API_URL)
                 .append("?flow=").append(ProviderUrls.encodeParam(sort))
-                .append("&is_reload=1&id=").append(ProviderUrls.encodeParam(mid))
+                .append("&is_reload=1&id=").append(ProviderUrls.encodeParam(idParam))
                 .append("&is_show_bulletin=2&is_mix=").append(isMix)
                 .append("&count=20&uid=").append(uid == null ? "" : ProviderUrls.encodeParam(uid))
                 .append("&fetch_level=").append(fetchLevel)

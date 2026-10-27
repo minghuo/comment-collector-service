@@ -53,9 +53,22 @@ public @interface ProviderMeta {
     /** 新条目的单次调用超时初值（毫秒）。 */
     long timeoutMs() default 20000;
 
-    /** 新条目的流控效果初值：REJECT（默认）/ WARM_UP / THROTTLE_QUEUE。 */
-    String flowEffect() default "REJECT";
+    /**
+     * 新条目的流控效果初值：THROTTLE_QUEUE（默认）/ REJECT / WARM_UP。
+     *
+     * <p>默认排队而不是拒绝：{@code REJECT} 会让并发冲上限的请求直接失败并叠加重试，
+     * 最终整条链接采集失败（2026-10-27 头条并发联调实证）。
+     *
+     * <p><b>单候选与多候选一律排队</b>（2026-10-27 定稿）：多候选平台里"候选"未必真的可用——
+     * 有的候选参与条件判断后实际仍是单供应商，有的会临时下线/熔断；按 QPS 匀速发请求时
+     * 正确行为就是排队等令牌，而不是把请求丢掉再叠加重试。排队超时（{@link #maxQueueWaitMs()}）
+     * 仍会让 facade 切到下一个候选，failover 语义不受影响。
+     *
+     * <p>只影响新插入条目；存量条目的取值以 {@code platform_feature_config} 为准
+     * （同步服务不会用注解覆盖已有条目的 rate/flow）。
+     */
+    String flowEffect() default "THROTTLE_QUEUE";
 
-    /** 新条目的 THROTTLE_QUEUE 最长排队等待初值（毫秒）。 */
-    long maxQueueWaitMs() default 0;
+    /** 新条目的 THROTTLE_QUEUE 最长排队等待初值（毫秒），仅 {@code THROTTLE_QUEUE} 生效。 */
+    long maxQueueWaitMs() default 30000;
 }

@@ -40,7 +40,8 @@ import java.util.Map;
  * </ul>
  */
 @ProviderCapability({ Capability.COMMENT, Capability.SUB_COMMENT, Capability.PAGE_PAGING, Capability.PROXY, Capability.SYNC_SUPPORTED })
-@ProviderMeta(platform = "toutiao", feature = "comment", name = "今日头条-本地爬虫")
+@ProviderMeta(platform = "toutiao", feature = "comment", name = "今日头条-本地爬虫",
+        flowEffect = "THROTTLE_QUEUE", maxQueueWaitMs = 30000)
 @Slf4j
 @Component("toutiao_local")
 public class TouTiaoLocalCrawlerProvider implements CommentProvider {
