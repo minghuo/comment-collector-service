@@ -43,8 +43,6 @@ public abstract class AbstractXgProvider implements CommentProvider {
 
     private static final HttpUtil httpUtil = HttpUtilProvider.apiClient();
 
-    private static final int RETRY = 3;
-
     @Value("${collector.provider.xg.api-token:}")
     private String apiToken;
 
@@ -81,41 +79,50 @@ public abstract class AbstractXgProvider implements CommentProvider {
     }
 
     /**
-     * 统一的取数 + 解析逻辑：code != 0 视为失败进入重试，成功时 data.info 一次取全。
+     * 统一的取数 + 解析逻辑：{@code code != 0} 视为上游失败，成功时 {@code data.info} 一次取全。
+     *
+     * <p><b>只发一次请求</b>：重试归管线 {@code RetryStage}，次数取任务所用平台功能配置的
+     * {@code providers[].max_retry}，且每次重试都会重新过 {@code RateLimitStage} 领取令牌 ——
+     * 既尊重上游 DPS，也不会让一次 fetch 内的私有重试绕开令牌桶（原 {@code RETRY = 3} 已删除）。
      */
     private CommonEntity<Comment> fetch(String apiUrl) {
-        for (int i = 0; i < RETRY; i++) {
-            try {
-                String body = httpUtil.getString(apiUrl, false);
-                if (StringUtils.isNotBlank(body)) {
-                    String upstreamCodeStr = CommonParser.getJsonPathOne(body, "$.code");
-                    Integer upstreamCode = CommonTools.stringToInteger(upstreamCodeStr);
-                    if (upstreamCode == null || upstreamCode != 0) {
-                        log.warn("{} 上游返回失败: code={} body={}", providerKey(), upstreamCodeStr,
-                                StringUtils.abbreviate(body, 200));
-                        CommonTools.sleep(1000);
-                        continue;
-                    }
-                    List<String> infoStrList = CommonParser.getJsonPathMany(body, "$.data.info");
-                    List<Comment> comments = new ArrayList<>();
-                    if (CollUtil.isNotEmpty(infoStrList)) {
-                        for (String infoStr : infoStrList) {
-                            comments.add(Comment.buildFromXg(infoStr));
-                        }
-                    }
-                    return CommonEntity.<Comment>builder()
-                            .haseMore(false)
-                            .totalPage(1)
-                            .status(CommonStatusEnum.STATUS_SUCCESS)
-                            .dataList(comments)
-                            .build();
+        try {
+            String body = httpUtil.getString(apiUrl, false);
+            if (StringUtils.isNotBlank(body)) {
+                String upstreamCodeStr = CommonParser.getJsonPathOne(body, "$.code");
+                Integer upstreamCode = CommonTools.stringToInteger(upstreamCodeStr);
+                if (upstreamCode == null || upstreamCode != 0) {
+                    log.warn("{} 上游返回失败: code={} body={}", providerKey(), upstreamCodeStr,
+                            StringUtils.abbreviate(body, 200));
+                    return failed("上游失败 code=" + upstreamCodeStr);
                 }
-            } catch (Exception e) {
-                log.warn("[xg] {} 第 {}/{} 次请求失败: {}", endpoint(), i + 1, RETRY, e.getMessage());
+                List<String> infoStrList = CommonParser.getJsonPathMany(body, "$.data.info");
+                List<Comment> comments = new ArrayList<>();
+                if (CollUtil.isNotEmpty(infoStrList)) {
+                    for (String infoStr : infoStrList) {
+                        comments.add(Comment.buildFromXg(infoStr));
+                    }
+                }
+                return CommonEntity.<Comment>builder()
+                        .haseMore(false)
+                        .totalPage(1)
+                        .status(CommonStatusEnum.STATUS_SUCCESS)
+                        .dataList(comments)
+                        .build();
             }
-            CommonTools.sleep(1000);
+            return failed("空响应");
+        } catch (Exception e) {
+            log.warn("[xg] {} 请求失败: {}", endpoint(), e.getMessage());
+            return failed(e.getMessage());
         }
-        return CommonEntity.<Comment>builder().haseMore(false)
-                .status(CommonStatusEnum.STATUS_ERROR).build();
+    }
+
+    /** 失败结果：由管线 {@code validate} 统一判定失败，再交给重试/候选切换。 */
+    private static CommonEntity<Comment> failed(String message) {
+        return CommonEntity.<Comment>builder()
+                .haseMore(false)
+                .status(CommonStatusEnum.STATUS_ERROR)
+                .msg(message)
+                .build();
     }
 }

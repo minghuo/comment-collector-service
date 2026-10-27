@@ -1,8 +1,10 @@
 package com.sysj.collector.core.pipeline;
 
 import com.sysj.collector.domain.service.SystemConfigService;
+import com.sysj.collector.exception.NonRetryableProviderException;
 import com.sysj.collector.exception.ProviderInvocationException;
 import com.sysj.collector.exception.ProviderTimeoutException;
+import com.sysj.collector.exception.RateLimitedException;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -90,6 +92,13 @@ public class RetryStage implements ProviderInvocationStage {
             try {
                 return next.get();
             } catch (RuntimeException e) {
+                // 不该重试的两类失败，直接上抛（连重试计数和退避都不走）：
+                // ① NonRetryable：确定性失败（链接不支持/内容已删除），重试只是白耗 DPS；
+                // ② RateLimited：令牌桶没额度，是本服务自己的保护动作，重试只会加剧排队 ——
+                //    立即把"当前限速已饱和"这条真实原因交回门面，由它决定切候选还是等下一轮。
+                if (e instanceof NonRetryableProviderException || e instanceof RateLimitedException) {
+                    throw e;
+                }
                 last = e;
                 log.warn("调用失败 attempt={}/{}: provider={} error={}",
                         attempt, ctx.maxRetry(), ctx.providerKey(), e.getMessage());

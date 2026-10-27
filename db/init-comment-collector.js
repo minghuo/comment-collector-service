@@ -29,8 +29,8 @@
  * ⚠️ provider_key 必须与 Spring Bean 名称完全一致
  *   应用通过 ApplicationContext.getBean(providerKey, CommentProvider.class) 取实现类。
  *   当前已注册的 Bean 名称（来自 @Component 注解）：
- *     bilibili_golaxy / douyin_golaxy / xhs_golaxy / toutiao_local
- *     weibo_official / local_crawler / weibo_repost_local
+ *     bilibili_golaxy / bilibili_local / douyin_golaxy / douyin_local / xhs_golaxy / toutiao_local
+ *     weibo_official / weibo_local / weibo_repost_local
  *     wechat_sy / wechat_video_sy
  *   写错会导致该供应商"Bean 未找到"而被静默跳过。
  */
@@ -45,6 +45,17 @@
  *
  * provider 字段（见设计文档 §6）：
  *   provider_key / name / rate_per_second / max_retry / priority / is_healthy / capabilities
+ *   rate_per_second —— **供应商 DPS（每秒请求数）上限的唯一配置来源**，存在本集合
+ *                      `platform_feature_config.providers[]` 里（MongoDB），由
+ *                      `DynamicProviderRouter` → `AdaptiveRateLimiter` 读取，改这里即可调速率，
+ *                      不需要改代码或重启（下一个调用周期生效）。
+ *                      有效速率 = min(rate_per_second, 1000 / adaptive_delay_ms)。
+ *                      注意：只有经过管线的请求才领令牌，所以采集请求一律只发一次，
+ *                      重试交给管线 —— 供应商内部自加重试会绕开令牌桶，实际 DPS 会超过本值。
+ *   max_retry       —— **供应商这一跳的重试次数（0 = 不重试）**，最多 max_retry + 1 次请求。
+ *                      2026-10-26 起全量统一取 3（= 最多 4 次请求），与旧的"供应商内部固定重试 3 次"
+ *                      语义对齐；重试由管线 `RetryStage` 执行，每次重试都重新领一次令牌，
+ *                      因此重试同样占用本供应商的 DPS 配额。
  *   max_concurrency —— Bulkhead 并发上限（§8.1，借鉴 B-20）；
  *                      经验值 ≈ rate_per_second × 预期响应秒数，再留一倍余量
  *   timeout_ms      —— **单次调用**超时（§9.5，借鉴 B-03），不是整条重试链；
@@ -67,7 +78,8 @@ const FEATURE_CONFIGS = [
       { provider_key: 'weibo_official', name: '微博-中科天玑接口', rate_per_second: 1.0, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 15000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
       // 微博网页版本地爬虫（需要在 requestParams 里传 cookie）
       // THROTTLE_QUEUE：自动翻页页间密集，REJECT 会立即失败并计入熔断形成恶性循环（与 B站本地一致）
-      { provider_key: 'local_crawler', name: '微博-本地爬虫', rate_per_second: 1.0, max_retry: 2, priority: 20, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','CURSOR_PAGING','LOGIN_STATE','PROXY','SYNC_SUPPORTED'] },
+      // provider_key 由旧的通用名 local_crawler 改为「平台_形态」的 weibo_local（与 Bean 名一致）
+      { provider_key: 'weibo_local', name: '微博-本地爬虫', rate_per_second: 1.0, max_retry: 3, priority: 20, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','CURSOR_PAGING','LOGIN_STATE','PROXY','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -75,7 +87,7 @@ const FEATURE_CONFIGS = [
     feature_code: 'repost',
     feature_name: '微博转发采集',
     providers: [
-      { provider_key: 'weibo_repost_local', name: '微博-转发本地爬虫', rate_per_second: 1.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','PAGE_PAGING','CURSOR_PAGING','LOGIN_STATE','PROXY','SYNC_SUPPORTED'] },
+      { provider_key: 'weibo_repost_local', name: '微博-转发本地爬虫', rate_per_second: 1.0, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','PAGE_PAGING','CURSOR_PAGING','LOGIN_STATE','PROXY','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -100,10 +112,10 @@ const FEATURE_CONFIGS = [
     feature_name: 'B站评论采集',
     providers: [
       // 中科天玑渠道（免登录）；本地 wbi 签名采集作为 cookie 场景的补充（LOGIN_STATE）
-      { provider_key: 'bilibili_golaxy', name: 'B站-中科天玑接口', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
+      { provider_key: 'bilibili_golaxy', name: 'B站-中科天玑接口', rate_per_second: 0.5, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
       // flow_effect=THROTTLE_QUEUE：自动翻页续采间隔密集（页间仅秒级），REJECT 会立即失败并计入
       // 熔断统计形成恶性循环；排队等令牌（最多 30s）与其它本地爬虫供应商的惯例一致
-      { provider_key: 'bilibili_local', name: 'B站-本地爬虫', rate_per_second: 1.0, max_retry: 2, priority: 20, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','LOGIN_STATE','SYNC_SUPPORTED'] },
+      { provider_key: 'bilibili_local', name: 'B站-本地爬虫', rate_per_second: 1.0, max_retry: 3, priority: 20, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','LOGIN_STATE','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -112,6 +124,10 @@ const FEATURE_CONFIGS = [
     feature_name: '抖音评论采集',
     providers: [
       { provider_key: 'douyin_golaxy', name: '抖音-中科天玑接口', rate_per_second: 1.0, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 15000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
+      // 抖音网页版本地爬虫（需要在 requestParams 里传 cookie；只发一次采集请求，重试归管线）
+      // a_bogus 为纯算实现（core/provider/douyin/sign），无需浏览器；翻页在供应商内按 page→cursor 换算
+      // THROTTLE_QUEUE：自动翻页页间密集，REJECT 会立即失败并计入熔断形成恶性循环（与微博/B站本地一致）
+      { provider_key: 'douyin_local', name: '抖音-本地爬虫', rate_per_second: 0.5, max_retry: 3, priority: 20, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','LOGIN_STATE','PROXY','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -127,7 +143,7 @@ const FEATURE_CONFIGS = [
     feature_code: 'comment',
     feature_name: '今日头条评论采集',
     providers: [
-      { provider_key: 'toutiao_local', name: '今日头条-本地爬虫', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','PROXY','SYNC_SUPPORTED'] },
+      { provider_key: 'toutiao_local', name: '今日头条-本地爬虫', rate_per_second: 0.5, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','PROXY','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -136,7 +152,7 @@ const FEATURE_CONFIGS = [
     feature_name: '百度贴吧评论采集',
     providers: [
       // 贴吧官方接口，无登录 cookie 可用；主列表 15 楼/页，楼中楼 30 条/页
-      { provider_key: 'tieba_local', name: '百度贴吧-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, target_concurrency: 3, max_delay_ms: 5000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
+      { provider_key: 'tieba_local', name: '百度贴吧-本地爬虫', rate_per_second: 2.0, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, target_concurrency: 3, max_delay_ms: 5000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -145,7 +161,7 @@ const FEATURE_CONFIGS = [
     feature_name: '荣耀社区评论采集',
     providers: [
       // Discuz 页面直出 HTML + XPath 解析；回复全部内嵌页面，无子回复接口（不声明 SUB_COMMENT）
-      { provider_key: 'honor_bbs_local', name: '荣耀社区-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, target_concurrency: 3, max_delay_ms: 5000, capabilities: ['COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
+      { provider_key: 'honor_bbs_local', name: '荣耀社区-本地爬虫', rate_per_second: 2.0, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, target_concurrency: 3, max_delay_ms: 5000, capabilities: ['COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -154,7 +170,7 @@ const FEATURE_CONFIGS = [
     feature_name: '华为社区评论采集',
     providers: [
       // vmall 俱乐部 SGW 网关接口（SGW-APP-ID 内置于实现）；页码分页
-      { provider_key: 'huawei_bbs_local', name: '华为社区-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, target_concurrency: 3, max_delay_ms: 5000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
+      { provider_key: 'huawei_bbs_local', name: '华为社区-本地爬虫', rate_per_second: 2.0, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, target_concurrency: 3, max_delay_ms: 5000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -163,7 +179,7 @@ const FEATURE_CONFIGS = [
     feature_name: 'OPPO社区评论采集',
     providers: [
       // www.oppo.cn 官方 UGC 接口（GET JSON，无需签名）；页码分页
-      { provider_key: 'oppo_bbs_local', name: 'OPPO社区-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, target_concurrency: 3, max_delay_ms: 5000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
+      { provider_key: 'oppo_bbs_local', name: 'OPPO社区-本地爬虫', rate_per_second: 2.0, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, target_concurrency: 3, max_delay_ms: 5000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -172,7 +188,7 @@ const FEATURE_CONFIGS = [
     feature_name: 'vivo社区评论采集',
     providers: [
       // bbs.vivo.com.cn 官方接口（nonce 签名内置于实现）；lastId 键集翻页
-      { provider_key: 'vivo_bbs_local', name: 'vivo社区-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, target_concurrency: 3, max_delay_ms: 5000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
+      { provider_key: 'vivo_bbs_local', name: 'vivo社区-本地爬虫', rate_per_second: 2.0, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, target_concurrency: 3, max_delay_ms: 5000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -181,7 +197,7 @@ const FEATURE_CONFIGS = [
     feature_name: '小米社区评论采集',
     providers: [
       // api.vip.miui.com 官方接口（GET，无需签名）；after 游标（主列表=偏移量，回复=末条回复 id）
-      { provider_key: 'xiaomi_bbs_local', name: '小米社区-本地爬虫', rate_per_second: 2.0, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, target_concurrency: 3, max_delay_ms: 5000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
+      { provider_key: 'xiaomi_bbs_local', name: '小米社区-本地爬虫', rate_per_second: 2.0, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, target_concurrency: 3, max_delay_ms: 5000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
     ],
   },
   // ── 星光（XG）渠道：海外三平台，同一外部服务（dataapi.supinfor.com），token 走 query，无翻页一次拉全 ──
@@ -190,7 +206,7 @@ const FEATURE_CONFIGS = [
     feature_code: 'comment',
     feature_name: 'Twitter评论采集',
     providers: [
-      { provider_key: 'xg_twitter', name: 'Twitter-星光渠道', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SYNC_SUPPORTED'] },
+      { provider_key: 'xg_twitter', name: 'Twitter-星光渠道', rate_per_second: 0.5, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -198,7 +214,7 @@ const FEATURE_CONFIGS = [
     feature_code: 'comment',
     feature_name: 'Facebook评论采集',
     providers: [
-      { provider_key: 'xg_facebook', name: 'Facebook-星光渠道', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SYNC_SUPPORTED'] },
+      { provider_key: 'xg_facebook', name: 'Facebook-星光渠道', rate_per_second: 0.5, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SYNC_SUPPORTED'] },
     ],
   },
   {
@@ -206,7 +222,7 @@ const FEATURE_CONFIGS = [
     feature_code: 'comment',
     feature_name: 'YouTube评论采集',
     providers: [
-      { provider_key: 'xg_youtube', name: 'YouTube-星光渠道', rate_per_second: 0.5, max_retry: 2, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SYNC_SUPPORTED'] },
+      { provider_key: 'xg_youtube', name: 'YouTube-星光渠道', rate_per_second: 0.5, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SYNC_SUPPORTED'] },
     ],
   },
 ];

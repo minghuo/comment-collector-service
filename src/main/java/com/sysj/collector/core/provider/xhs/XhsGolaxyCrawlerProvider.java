@@ -46,8 +46,6 @@ public class XhsGolaxyCrawlerProvider implements CommentProvider {
 
     private static final HttpUtil httpUtil = HttpUtilProvider.apiClient();
 
-    private static final int RETRY = 3;
-
     @Override
     public String providerKey() {
         return "xhs_golaxy";
@@ -84,48 +82,58 @@ public class XhsGolaxyCrawlerProvider implements CommentProvider {
 
     /**
      * 统一的取数 + 解析逻辑（主评论与子评论共用，仅 URL 不同）。
+     *
+     * <p><b>只发一次请求</b>：重试归管线 {@code RetryStage}，次数取任务所用平台功能配置的
+     * {@code providers[].max_retry}，且每次重试都会重新过 {@code RateLimitStage} 领取令牌 ——
+     * 既尊重上游 DPS，也不会让一次 fetch 内的私有重试绕开令牌桶（原 {@code RETRY = 3} 已删除）。
      */
     private CommonEntity<Comment> fetch(String apiUrl) {
-        for (int i = 0; i < RETRY; i++) {
-            try {
-                String body = httpUtil.getString(apiUrl, false);
-                if (StringUtils.isNotBlank(body) && body.contains("comments")) {
-                    // 上游用 code != 200 表达失败（如 {"code":500,"message":"获取评论信息失败, 请重试"}），
-                    // 此时不能当成"成功但无数据"，否则会被误判为 SUCCESS，既不重试也不切换供应商。
-                    String upstreamCodeStr = CommonParser.getJsonPathOne(body, "$.code");
-                    if (StringUtils.isNotBlank(upstreamCodeStr)) {
-                        Integer upstreamCode = CommonTools.stringToInteger(upstreamCodeStr);
-                        if (upstreamCode != null && upstreamCode != 200) {
-                            log.warn("{} 上游返回失败: code={} message={}", providerKey(), upstreamCode,
-                                    CommonParser.getJsonPathOne(body, "$.message"));
-                            CommonTools.sleep(1000);
-                            continue;
-                        }
+        try {
+            String body = httpUtil.getString(apiUrl, false);
+            if (StringUtils.isNotBlank(body) && body.contains("comments")) {
+                // 上游用 code != 200 表达失败（如 {"code":500,"message":"获取评论信息失败, 请重试"}），
+                // 此时不能当成"成功但无数据"，否则会被误判为 SUCCESS，既不重试也不切换供应商。
+                String upstreamCodeStr = CommonParser.getJsonPathOne(body, "$.code");
+                if (StringUtils.isNotBlank(upstreamCodeStr)) {
+                    Integer upstreamCode = CommonTools.stringToInteger(upstreamCodeStr);
+                    if (upstreamCode != null && upstreamCode != 200) {
+                        String message = CommonParser.getJsonPathOne(body, "$.message");
+                        log.warn("{} 上游返回失败: code={} message={}", providerKey(), upstreamCode, message);
+                        return failed("上游失败 code=" + upstreamCode);
                     }
-                    String nextCursor = CommonParser.getJsonPathOne(body, "$.cursor");
-                    boolean hasMore = "1".equals(CommonParser.getJsonPathOne(body, "$.has_more"));
-                    Integer totalPage = CommonTools.totalPage(
-                            CommonTools.stringToInteger(CommonParser.getJsonPathOne(body, "$.total")), 20);
-                    List<String> commentStrList = CommonParser.getJsonPathMany(body, "$.comments");
-                    List<Comment> comments = new ArrayList<>();
-                    if (CollUtil.isNotEmpty(commentStrList)) {
-                        for (String commentStr : commentStrList) {
-                            comments.add(Comment.buildFromGolaxy(commentStr));
-                        }
-                    }
-                    return CommonEntity.<Comment>builder()
-                            .haseMore(hasMore)
-                            .nextUrl(nextCursor)
-                            .totalPage(totalPage)
-                            .status(CommonStatusEnum.STATUS_SUCCESS)
-                            .dataList(comments)
-                            .build();
                 }
-            } catch (Exception e) {
-                log.warn("[xhs-golaxy] 第 {}/{} 次请求失败: {}", i + 1, RETRY, e.getMessage());
+                String nextCursor = CommonParser.getJsonPathOne(body, "$.cursor");
+                boolean hasMore = "1".equals(CommonParser.getJsonPathOne(body, "$.has_more"));
+                Integer totalPage = CommonTools.totalPage(
+                        CommonTools.stringToInteger(CommonParser.getJsonPathOne(body, "$.total")), 20);
+                List<String> commentStrList = CommonParser.getJsonPathMany(body, "$.comments");
+                List<Comment> comments = new ArrayList<>();
+                if (CollUtil.isNotEmpty(commentStrList)) {
+                    for (String commentStr : commentStrList) {
+                        comments.add(Comment.buildFromGolaxy(commentStr));
+                    }
+                }
+                return CommonEntity.<Comment>builder()
+                        .haseMore(hasMore)
+                        .nextUrl(nextCursor)
+                        .totalPage(totalPage)
+                        .status(CommonStatusEnum.STATUS_SUCCESS)
+                        .dataList(comments)
+                        .build();
             }
-            CommonTools.sleep(1000);
+            return failed("响应不含 comments 字段");
+        } catch (Exception e) {
+            log.warn("[xhs-golaxy] 请求失败: {}", e.getMessage());
+            return failed(e.getMessage());
         }
-        return CommonEntity.<Comment>builder().haseMore(false).status(CommonStatusEnum.STATUS_ERROR).build();
+    }
+
+    /** 失败结果：由管线 {@code validate} 统一判定失败，再交给重试/候选切换。 */
+    private static CommonEntity<Comment> failed(String message) {
+        return CommonEntity.<Comment>builder()
+                .haseMore(false)
+                .status(CommonStatusEnum.STATUS_ERROR)
+                .msg(message)
+                .build();
     }
 }

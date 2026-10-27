@@ -3,6 +3,7 @@ package com.sysj.collector.core.pipeline;
 import com.sysj.collector.core.provider.CommentProvider;
 import com.sysj.collector.core.router.DynamicProviderRouter;
 import com.sysj.collector.domain.document.PlatformFeatureConfig.ProviderConfig;
+import com.sysj.collector.exception.NonRetryableProviderException;
 import com.sysj.collector.exception.ProviderInvocationException;
 import com.sysj.collector.model.Comment;
 import com.sysj.collector.model.CommentCollectRequest;
@@ -206,6 +207,11 @@ public class ProviderInvocationPipeline {
      *
      * <p>供应商有两种失败表达方式：抛异常、返回 {@code status != STATUS_SUCCESS}。
      * 二者都必须变成异常，否则会出现"不重试、不切换、还返回 success=true + 空列表"的错误行为。
+     *
+     * <p>其中 {@code STATUS_URL_ERROR}（链接不支持）与 {@code STATUS_PARAM}（参数缺失/内容已删除）
+     * 属于<b>确定性失败</b>，同样的请求再发一次结果必然相同，因此抛
+     * {@link NonRetryableProviderException}，由 {@code RetryStage} 直接上抛、不占重试次数、
+     * 不重复消耗供应商 DPS 配额。
      */
     private void validate(InvocationContext ctx, CommonEntity<Comment> entity) {
         if (entity == null) {
@@ -213,10 +219,19 @@ public class ProviderInvocationPipeline {
                     "供应商 [" + ctx.providerKey() + "] 返回 null");
         }
         if (entity.getStatus() != CommonStatusEnum.STATUS_SUCCESS) {
-            throw new ProviderInvocationException(ctx.providerKey(),
-                    "供应商 [" + ctx.providerKey() + "] 返回失败状态: " + entity.getStatus()
-                            + (entity.getMsg() == null ? "" : " / " + entity.getMsg()));
+            String detail = "供应商 [" + ctx.providerKey() + "] 返回失败状态: " + entity.getStatus()
+                    + (entity.getMsg() == null ? "" : " / " + entity.getMsg());
+            if (isDeterministic(entity.getStatus())) {
+                throw new NonRetryableProviderException(ctx.providerKey(), detail);
+            }
+            throw new ProviderInvocationException(ctx.providerKey(), detail);
         }
+    }
+
+    /** 确定性失败：重试不会改变结果。 */
+    private static boolean isDeterministic(CommonStatusEnum status) {
+        return status == CommonStatusEnum.STATUS_URL_ERROR
+                || status == CommonStatusEnum.STATUS_PARAM;
     }
 
     /** 已装配的链，形如 {@code Bulkhead → CircuitBreaker → …}（供启动日志与诊断接口）。 */

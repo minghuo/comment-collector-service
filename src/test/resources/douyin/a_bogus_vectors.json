@@ -1,0 +1,370 @@
+{
+  "noise": [
+    0.123456789,
+    0.271828182,
+    0.314159265,
+    0.161803398,
+    0.141421356,
+    0.577215664,
+    0.69314718,
+    0.434294481,
+    0.207879576,
+    0.367879441,
+    0.049787068,
+    0.135335283,
+    0.018315638,
+    0.000911881,
+    0.999123456,
+    0.5,
+    0.333333333,
+    0.666666666,
+    0.25,
+    0.75,
+    0.125,
+    0.875,
+    0.0625,
+    0.9375,
+    0.03125,
+    0.96875,
+    0.015625,
+    0.984375,
+    0.0078125,
+    0.9921875,
+    0.00390625,
+    0.99609375,
+    0.001953125,
+    0.998046875,
+    0.000976562,
+    0.999023437,
+    0.000488281,
+    0.999511718,
+    0.00024414,
+    0.999755859,
+    0.00012207,
+    0.999877929,
+    6.1035e-05,
+    0.999938964,
+    3.0517e-05,
+    0.999969482,
+    1.5258e-05,
+    0.999984741,
+    7.629e-06,
+    0.99999237,
+    3.814e-06,
+    0.999996185,
+    1.907e-06,
+    0.999998092,
+    9.53e-07,
+    0.999999046,
+    4.76e-07,
+    0.999999523,
+    2.38e-07,
+    0.999999761,
+    1.19e-07,
+    0.99999988,
+    5.9e-08,
+    0.99999994
+  ],
+  "vectors": [
+    {
+      "name": "comment_list_chrome",
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+      "browserInfo": "1920|947|1920|1032|1920|1032|1920|1080|Win32",
+      "query": "device_platform=webapp&aid=6383&channel=channel_pc_web&aweme_id=7695724801243024683&pc_img_format=webp&cursor=0&count=20&item_type=0&insert_ids=&whale_cut_token=&cut_version=1&rcFT=&update_version_code=170400&pc_client_type=1&pc_libra_divert=Windows&support_h265=1&support_dash=1&cpu_core_num=16&version_code=170400&version_name=17.4.0&cookie_enabled=true&screen_width=1536&screen_height=960&browser_language=zh-CN&browser_platform=Win32&browser_name=Chrome&browser_version=155.0.0.0&browser_online=true&engine_name=Blink&engine_version=155.0.0.0&os_name=Windows&os_version=10&device_memory=32&platform=PC&downlink=10&effective_type=4g&round_trip_time=50&webid=7701151180043748898&uifid=ce97285be22ce9307f0362f1de57126fbd12610234088c2dab7be7f4f864c4d32&verifyFp=verify_mvq00boe_XSwerVWV_LEsK_4omn_B0Xo_tzuhgw3vlRxr&fp=verify_mvq00boe_XSwerVWV_LEsK_4omn_B0Xo_tzuhgw3vlRxr&msToken=7MD16RLp8J2P6liLbaGCDHdummy",
+      "body": "",
+      "contentType": "",
+      "nowMs": 1793064266000,
+      "aBogus": "Ey0fkeWjQqmbcdFtucj5trOlSHnArsWyh4iKW9OTtOT2y7tGqbPnzrcIbxqes0E4DRB0i91HNE0MYxxcqsX0pF9kumkkuqwSos5CV86oMqimGzJQgrjseLXFKwMNUc4q-557iA4I/UJ96jdAkrQL/QA9HKLCQbWBM3OfkZTbN9BhZFgALZc-PpGpEXkq-j==",
+      "structureError": null,
+      "decoded": {
+        "headerMagic": [
+          3,
+          82
+        ],
+        "sdkVersion": [
+          1,
+          0,
+          1,
+          0
+        ],
+        "nowMs": 1793064266000,
+        "inkMs": 1793064265999,
+        "pageId": 6241,
+        "aid": 6383,
+        "envFlags": 1,
+        "detectFlags": 14,
+        "callBucket": 6,
+        "tripwire": 3,
+        "browserInfo": "1920|947|1920|1032|1920|1032|1920|1080|Win32",
+        "tail": "19,"
+      },
+      "digestChains": {
+        "query": [
+          200,
+          1,
+          232
+        ],
+        "body": [
+          82,
+          177,
+          44
+        ],
+        "userAgent": [
+          100,
+          210,
+          159
+        ]
+      }
+    },
+    {
+      "name": "comment_list_edge_mac",
+      "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36 Edg/155.0.0.0",
+      "browserInfo": "1920|947|1920|1032|1920|1032|1920|1080|MacIntel",
+      "query": "device_platform=webapp&aid=6383&channel=channel_pc_web&aweme_id=7695724801243024683&pc_img_format=webp&cursor=0&count=20&item_type=0&insert_ids=&whale_cut_token=&cut_version=1&rcFT=&update_version_code=170400&pc_client_type=1&pc_libra_divert=Windows&support_h265=1&support_dash=1&cpu_core_num=16&version_code=170400&version_name=17.4.0&cookie_enabled=true&screen_width=1536&screen_height=960&browser_language=zh-CN&browser_platform=Win32&browser_name=Chrome&browser_version=155.0.0.0&browser_online=true&engine_name=Blink&engine_version=155.0.0.0&os_name=Windows&os_version=10&device_memory=32&platform=PC&downlink=10&effective_type=4g&round_trip_time=50&webid=7701151180043748898&uifid=ce97285be22ce9307f0362f1de57126fbd12610234088c2dab7be7f4f864c4d32&verifyFp=verify_mvq00boe_XSwerVWV_LEsK_4omn_B0Xo_tzuhgw3vlRxr&fp=verify_mvq00boe_XSwerVWV_LEsK_4omn_B0Xo_tzuhgw3vlRxr&msToken=7MD16RLp8J2P6liLbaGCDHdummy",
+      "body": "",
+      "contentType": "",
+      "nowMs": 1793116800000,
+      "aBogus": "EyMVDFWjQqmbcdFtucjs77dlbHnArsWyh4iKW9OTtOT2y7tGSbPnzNb9boK4skOGkRB0i91HHjtMYxxcqsX0pF9kumkkuOwWqsACVu6oMqwmGzJQgrjseLXFKwMNUc4q-557iA4I/UJ96jdAkrQL/QA9HKLCQbWBM3OfkZTbN9BhZK8IoZMsiZs2yfjqQOoQgE==",
+      "structureError": null,
+      "decoded": {
+        "headerMagic": [
+          3,
+          82
+        ],
+        "sdkVersion": [
+          1,
+          0,
+          1,
+          0
+        ],
+        "nowMs": 1793116800000,
+        "inkMs": 1793116799999,
+        "pageId": 6241,
+        "aid": 6383,
+        "envFlags": 1,
+        "detectFlags": 14,
+        "callBucket": 6,
+        "tripwire": 3,
+        "browserInfo": "1920|947|1920|1032|1920|1032|1920|1080|MacIntel",
+        "tail": "3,"
+      },
+      "digestChains": {
+        "query": [
+          200,
+          1,
+          232
+        ],
+        "body": [
+          82,
+          177,
+          44
+        ],
+        "userAgent": [
+          87,
+          143,
+          121
+        ]
+      }
+    },
+    {
+      "name": "comment_replies",
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+      "browserInfo": "1920|947|1920|1032|1920|1032|1920|1080|Win32",
+      "query": "device_platform=webapp&aid=6383&channel=channel_pc_web&item_id=7695724801243024683&comment_id=7696000000000000001&cursor=0&count=20&item_type=0&version_code=170400&version_name=17.4.0",
+      "body": "",
+      "contentType": "",
+      "nowMs": 1793064266000,
+      "aBogus": "Ey0fkeWjQqmbcdFtucj5trOlSHnArsWyUGiKRoQTtNu2y7tGqbPnzrcIbxqes0E4DRB0i91HNE0MYxxcqsX0pF9kumkkuqwSos5CV86oMqimGzJQgrjseLXFKwMNUc4q-557iA4I/UJ96jdAkrQL/QA9HKLCQbWBM3OfkZTbN9BhZFgALZc-PpGpEXkqJf==",
+      "structureError": null,
+      "decoded": {
+        "headerMagic": [
+          3,
+          82
+        ],
+        "sdkVersion": [
+          1,
+          0,
+          1,
+          0
+        ],
+        "nowMs": 1793064266000,
+        "inkMs": 1793064265999,
+        "pageId": 6241,
+        "aid": 6383,
+        "envFlags": 1,
+        "detectFlags": 14,
+        "callBucket": 6,
+        "tripwire": 3,
+        "browserInfo": "1920|947|1920|1032|1920|1032|1920|1080|Win32",
+        "tail": "19,"
+      },
+      "digestChains": {
+        "query": [
+          136,
+          114,
+          113
+        ],
+        "body": [
+          82,
+          177,
+          44
+        ],
+        "userAgent": [
+          100,
+          210,
+          159
+        ]
+      }
+    },
+    {
+      "name": "chinese_query",
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+      "browserInfo": "1920|947|1920|1032|1920|1032|1920|1080|Win32",
+      "query": "device_platform=webapp&aid=6383&keyword=%E8%AF%84%E8%AE%BA%20%E6%B5%8B%E8%AF%95&note=中文",
+      "body": "",
+      "contentType": "",
+      "nowMs": 1793064266123,
+      "aBogus": "Ey0fkeWjQqmbcdFtucj5trOlRZVArsWy/GiKWndTtNugy7eYqbPnzrcIbxqes0E4DRB0i91HNE0MYxxcqsX0pF9kumkkuFibos5CV88oMqwmGzJQgrjseLXFKwMNUc4q-557iA4I/UJ96jdAkrQL/QA9HKLCQbWBM3OfkZTbN9BhZFgALZc-PpGpEhJT0COS",
+      "structureError": null,
+      "decoded": {
+        "headerMagic": [
+          3,
+          82
+        ],
+        "sdkVersion": [
+          1,
+          0,
+          1,
+          0
+        ],
+        "nowMs": 1793064266123,
+        "inkMs": 1793064266122,
+        "pageId": 6241,
+        "aid": 6383,
+        "envFlags": 1,
+        "detectFlags": 14,
+        "callBucket": 6,
+        "tripwire": 3,
+        "browserInfo": "1920|947|1920|1032|1920|1032|1920|1080|Win32",
+        "tail": "142,"
+      },
+      "digestChains": {
+        "query": [
+          27,
+          47,
+          51
+        ],
+        "body": [
+          82,
+          177,
+          44
+        ],
+        "userAgent": [
+          100,
+          210,
+          159
+        ]
+      }
+    },
+    {
+      "name": "post_body_hashed",
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+      "browserInfo": "1920|947|1920|1032|1920|1032|1920|1080|Win32",
+      "query": "device_platform=webapp&aid=6383&aweme_id=7695724801243024683&cursor=0&count=20&item_type=0",
+      "body": "magic=538969122&version=1&dataType=8&strData=abc",
+      "contentType": "application/x-www-form-urlencoded",
+      "nowMs": 1793064270000,
+      "aBogus": "Ey0fkeWjQqmbcdFtucj5trOlWy9ArsWy1GiKWoOTtxTYy7tYqbPnTidIbONes0E4DRB0i91HNE0iYxxOqsI8dF9kumkkuFwWos5CV88oMqwmGzJQgrjseLXFKwMNUc4q-557iA4I/UJ96jdAkrQL/QA9HKLCQbWBM3OfkZTbN9BhZFgALZc-PpGpE7JN0HO7",
+      "structureError": null,
+      "decoded": {
+        "headerMagic": [
+          3,
+          82
+        ],
+        "sdkVersion": [
+          1,
+          0,
+          1,
+          0
+        ],
+        "nowMs": 1793064270000,
+        "inkMs": 1793064269999,
+        "pageId": 6241,
+        "aid": 6383,
+        "envFlags": 1,
+        "detectFlags": 14,
+        "callBucket": 6,
+        "tripwire": 3,
+        "browserInfo": "1920|947|1920|1032|1920|1032|1920|1080|Win32",
+        "tail": "179,"
+      },
+      "digestChains": {
+        "query": [
+          247,
+          74,
+          104
+        ],
+        "body": [
+          108,
+          116,
+          131
+        ],
+        "userAgent": [
+          100,
+          210,
+          159
+        ]
+      }
+    },
+    {
+      "name": "multipart_body_blanked",
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+      "browserInfo": "1920|947|1920|1032|1920|1032|1920|1080|Win32",
+      "query": "device_platform=webapp&aid=6383",
+      "body": "------WebKitFormBoundary\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n",
+      "contentType": "multipart/form-data; boundary=----WebKitFormBoundary",
+      "nowMs": 1793064271000,
+      "aBogus": "Ey0fkeWjQqmbcdFtucj5trclW9IArsWyU4iKb9xTtPuLy7tTobPnTNcIbxqes0E4DRB0i91HNE0MYxxcqsX0pF9kumkkuKwyos5CV88oMqwmGzJQgrjseLXFKwMNUc4q-557iA4I/UJ96jdAkrQL/QA9HKLCQbWBM3OfkZTbN9BhZFgALZc-PpGpEXJF0HKX",
+      "structureError": null,
+      "decoded": {
+        "headerMagic": [
+          3,
+          82
+        ],
+        "sdkVersion": [
+          1,
+          0,
+          1,
+          0
+        ],
+        "nowMs": 1793064271000,
+        "inkMs": 1793064270999,
+        "pageId": 6241,
+        "aid": 6383,
+        "envFlags": 1,
+        "detectFlags": 14,
+        "callBucket": 6,
+        "tripwire": 3,
+        "browserInfo": "1920|947|1920|1032|1920|1032|1920|1080|Win32",
+        "tail": "155,"
+      },
+      "digestChains": {
+        "query": [
+          186,
+          241,
+          251
+        ],
+        "body": [
+          82,
+          177,
+          44
+        ],
+        "userAgent": [
+          100,
+          210,
+          159
+        ]
+      }
+    }
+  ]
+}

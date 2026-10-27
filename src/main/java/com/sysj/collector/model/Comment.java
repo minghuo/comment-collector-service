@@ -491,6 +491,73 @@ public class Comment {
     }
 
     /**
+     * 从抖音网页版评论接口返回的单条 JSON 构建 Comment。
+     *
+     * <p>适用两个接口：{@code /aweme/v1/web/comment/list/}（一级）与
+     * {@code /aweme/v1/web/comment/list/reply/}（二级）。字段映射以真实响应为准：
+     * <ul>
+     *   <li>{@code create_time} 是<b>秒级</b>时间戳，需要 ×1000；</li>
+     *   <li>{@code mid} 取视频 {@code aweme_id}（落库业务主键 {@code taskId-{mid}-{commentId}}
+     *       依赖它，缺失会让同一评论在不同任务间互相覆盖）；</li>
+     *   <li>顶层评论的 {@code reply_id} 是 {@code "0"}，与 B站 {@code root} 一样原样保留；
+     *       采二级评论时调用方传父评论 id 覆盖（以请求上下文为准，比信任响应里的 {@code reply_id} 稳）；</li>
+     *   <li>{@code user.gender} 是数字（0 未知 / 1 男 / 2 女），映射成中文，原始值另存
+     *       {@code extra.genderCode}，平台改语义时能回溯；</li>
+     *   <li>抖音特有维度（视频 id、二级评论总数、置顶标记、抖音号、sec_uid）统一放 {@link #extra}。</li>
+     * </ul>
+     *
+     * @param dataStr         单条评论 JSON（{@code $.comments[]} 的一个元素）
+     * @param awemeId         视频 id（写入 {@code mid}）
+     * @param parentCommentId 父评论 id；为空时回退响应里的 {@code reply_id}
+     */
+    public static Comment buildFromDouyinLocal(String dataStr, String awemeId, String parentCommentId) {
+        Long timeLong = CommonTools.stringToLong(CommonParser.getJsonPathOne(dataStr, "$.create_time"));
+        String replyId = CommonParser.getJsonPathOne(dataStr, "$.reply_id");
+        String genderCode = CommonParser.getJsonPathOne(dataStr, "$.user.gender");
+        Map<String, Object> extra = new HashMap<>();
+        extra.put("aweme_id", awemeId);
+        extra.put("reply_id", replyId);
+        extra.put("sec_uid", CommonParser.getJsonPathOne(dataStr, "$.user.sec_uid"));
+        extra.put("unique_id", CommonParser.getJsonPathOne(dataStr, "$.user.unique_id"));
+        extra.put("genderCode", genderCode);
+        extra.put("isTop", CommonTools.stringToInteger(CommonParser.getJsonPathOne(dataStr, "$.is_top")));
+        return Comment.builder()
+                .commentId(CommonParser.getJsonPathOne(dataStr, "$.cid"))
+                .parentCommentId(StringUtils.isNotBlank(parentCommentId) ? parentCommentId : replyId)
+                .mid(awemeId)
+                .uid(CommonParser.getJsonPathOne(dataStr, "$.user.uid"))
+                .userName(CommonParser.getJsonPathOne(dataStr, "$.user.nickname"))
+                .text(CommonParser.getJsonPathOne(dataStr, "$.text"))
+                .time(timeLong != null && timeLong > 0
+                        ? TimeParser.dateFormatString(new Date(timeLong * 1000L)) : null)
+                .likeCount(CommonTools.stringToInteger(CommonParser.getJsonPathOne(dataStr, "$.digg_count")))
+                .replyCount(CommonTools.stringToInteger(CommonParser.getJsonPathOne(dataStr, "$.reply_comment_total")))
+                .ipLocation(CommonParser.getJsonPathOne(dataStr, "$.ip_label"))
+                .gender(genderText(genderCode))
+                .description(CommonParser.getJsonPathOne(dataStr, "$.user.signature"))
+                .extra(extra)
+                .insertTime(System.currentTimeMillis())
+                .build();
+    }
+
+    /** 抖音 {@code gender} 数字 → 中文（0 未知 / 1 男 / 2 女；其它值原样保留，便于发现平台变更）。 */
+    private static String genderText(String genderCode) {
+        if (StringUtils.isBlank(genderCode)) {
+            return null;
+        }
+        switch (genderCode.trim()) {
+            case "1":
+                return "男";
+            case "2":
+                return "女";
+            case "0":
+                return null;
+            default:
+                return genderCode;
+        }
+    }
+
+    /**
      * 从星光（XG）渠道评论接口返回的单条 JSON 构建 Comment。
      *
      * <p>Twitter/Facebook/YouTube 三平台共用同一 JSON 结构，字段映射与 auto-task-web 的

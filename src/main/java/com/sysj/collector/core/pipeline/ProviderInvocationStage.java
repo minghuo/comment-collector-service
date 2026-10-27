@@ -44,10 +44,16 @@ public interface ProviderInvocationStage {
         public static final int BULKHEAD = 100;
         /** CircuitBreaker：快速失败。 */
         public static final int CIRCUIT_BREAKER = 200;
-        /** RateLimiter：控速。 */
-        public static final int RATE_LIMIT = 300;
-        /** Retry：重试（必须在 Timeout 外层，理由见 §8.1）。 */
-        public static final int RETRY = 400;
+        /** Retry：重试（必须在 Timeout 外层，且在 RateLimit 外层）。 */
+        public static final int RETRY = 300;
+        /**
+         * RateLimiter：控速。
+         *
+         * <p><b>为什么在 Retry 内层</b>：每次重试都要重新领一次令牌，重试才真正占用供应商 DPS 配额。
+         * 反过来（RateLimit 在外）一次成功调用只领一次令牌、内部重试白嫖额度，
+         * 与"按 rate_per_second 精确控制上游压力"的契约不符。
+         */
+        public static final int RATE_LIMIT = 400;
         /** Timeout：单次尝试限时，最内层。 */
         public static final int TIMEOUT = 500;
 

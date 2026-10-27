@@ -1,7 +1,6 @@
 package com.sysj.collector.core.provider.bilibili;
 
 import cn.hutool.core.collection.CollUtil;
-import cn.hutool.core.util.RandomUtil;
 import com.bewilder.parser.CommonParser;
 import com.bewilder.tools.CommonTools;
 import com.sysj.collector.core.provider.Capability;
@@ -138,8 +137,10 @@ public class BiliLocalCrawlerProvider implements CommentProvider {
      * wbi 签名请求：next 为查询参数串，附 w_rid/wts
      */
     private String signedGet(String next, String cookie) {
-        // 对齐原实现的随机间隔，降低风控触发概率
-        CommonTools.sleep(RandomUtil.randomInt(500, 1000));
+        // 礼貌延时已注释（2026-10-26）：采集请求的节流统一交给管线 RateLimitStage，
+        // 供应商内部的随机 sleep 会额外拉长单次调用耗时、扰动自适应限速的延迟标定。
+        // 原实现：对齐 auto-task-web 的随机间隔，降低风控触发概率
+        // CommonTools.sleep(RandomUtil.randomInt(500, 1000));
         long wts = System.currentTimeMillis() / 1000;
         String wRid = DigestUtils.md5Hex(next + "&wts=" + wts + WBI_SALT).toLowerCase();
         String url = "https://api.bilibili.com/x/v2/reply/wbi/main?" + next + "&w_rid=" + wRid + "&wts=" + wts;
@@ -203,7 +204,8 @@ public class BiliLocalCrawlerProvider implements CommentProvider {
      * 子评论采集：reply 接口页码翻页（无需 wbi/cookie），nextUrl 用 {@code replypage=N} 形态回传
      */
     private CommonEntity<Comment> fetchReplies(String oid, String type, String commentId, int page) {
-        CommonTools.sleep(RandomUtil.randomInt(500, 1000));
+        // 礼貌延时已注释（2026-10-26）：节流统一交给管线 RateLimitStage，理由同 signedGet
+        // CommonTools.sleep(RandomUtil.randomInt(500, 1000));
         String apiUrl = "https://api.bilibili.com/x/v2/reply/reply?oid=" + oid + "&type=" + type
                 + "&root=" + commentId + "&ps=10&pn=" + page + "&web_location=333.1368";
         String result;
@@ -295,6 +297,66 @@ public class BiliLocalCrawlerProvider implements CommentProvider {
         return null;
     }
 
+    // ──────────────────────────────────────────────────────────────────────
+    // 种子解析（外取 oid）重试：此处刻意保留内层重试 + sleep
+    // ──────────────────────────────────────────────────────────────────────
+    //
+    // 与"采集请求只发一次、重试归管线 RetryStage"的约定**有意不同**：
+    //   · BV→aid / 动态→comment_id 只在一次采集的**首轮**发生，每轮最多 1~2 次；
+    //   · 换算失败 ⇒ 该帖子整条评论都采不到，用掉一次管线重试也未必能拿到，
+    //     所以在种子这一步就地重试 + 退避，成功率收益远大于 DPS 影响；
+    //   · 主/子评论请求仍只走管线，不绕令牌桶，DPS 控制不受影响。
+
+    /** 种子解析最大尝试次数（首试 + 2 次重试）。 */
+    private static final int SEED_MAX_ATTEMPTS = 3;
+
+    /** 种子解析首次重试前的等待毫秒数，之后每次翻倍（1s → 2s）。 */
+    private static final long SEED_RETRY_BASE_MS = 1000L;
+
+    /** 种子解析单次尝试的短暂停顿，避免连续两次请求贴得太近。 */
+    private static final long SEED_REQUEST_GAP_MS = 300L;
+
+    /**
+     * 带重试的种子解析：成功判据由 {@code isSuccess} 给出，失败退避重试。
+     *
+     * @param what      日志用的描述，如 {@code "BV->aid"}
+     * @param resolver  实际解析逻辑（内部已把异常吞成日志）
+     * @param isSuccess 结果是否已拿到可用 oid
+     * @return 最后一次尝试的非空结果；中途成功则直接返回
+     */
+    private Map<String, String> resolveSeedWithRetry(String what,
+                                                     java.util.function.Supplier<Map<String, String>> resolver,
+                                                     java.util.function.Predicate<Map<String, String>> isSuccess) {
+        Map<String, String> result = null;
+        for (int attempt = 1; attempt <= SEED_MAX_ATTEMPTS; attempt++) {
+            if (attempt > 1) {
+                long delay = SEED_RETRY_BASE_MS << (attempt - 2);
+                log.warn("[bili-local] {} 种子解析未拿到 oid，{}ms 后重试（第 {}/{} 次）",
+                        what, delay, attempt, SEED_MAX_ATTEMPTS);
+                sleepQuietly(delay);
+            }
+            result = resolver.get();
+            if (isSuccess.test(result)) {
+                if (attempt > 1) {
+                    log.info("[bili-local] {} 种子解析在第 {} 次尝试成功: oid={}", what, attempt, result.get("oid"));
+                }
+                return result;
+            }
+            sleepQuietly(SEED_REQUEST_GAP_MS);
+        }
+        log.warn("[bili-local] {} 种子解析 {} 次后仍失败", what, SEED_MAX_ATTEMPTS);
+        return result == null ? new HashMap<>() : result;
+    }
+
+    /** 静默 sleep：被中断时恢复中断标志直接返回，由调用方继续走失败分支。 */
+    private static void sleepQuietly(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     /**
      * 解析评论区目标（oid=数字 aid + type）：优先原始链接，缺失时回退调用方透传的 mid
      * （可能是链接或 BV 号）。BV 号经 view 接口换算 aid；动态 ID 经 dynamic-detail 换算
@@ -322,11 +384,15 @@ public class BiliLocalCrawlerProvider implements CommentProvider {
         }
         // mid 是裸 BV 号（无链接形态）：直接换算
         if (StringUtils.isNotBlank(mid) && mid.contains("BV")) {
-            return fetchViewAid(mid, cookie);
+            return resolveSeedWithRetry("BV->aid",
+                    () -> fetchViewAid(mid, cookie),
+                    target -> StringUtils.isNotBlank(target.get("oid")));
         }
-        // 动态 ID（纯数字但来自 t.bilibili.com 语境）：按动态详情换算
+        // 动态 ID（纯数字但来自 t.bilibili.com 语境）：按动态详情换算（种子解析，内层带重试）
         if (StringUtils.isNotBlank(mid) && mid.matches("\\d+")) {
-            return fetchDynamicCommentId(mid, cookie);
+            return resolveSeedWithRetry("动态->comment_id",
+                    () -> fetchDynamicCommentId(mid, cookie),
+                    target -> StringUtils.isNotBlank(target.get("oid")));
         }
         return new HashMap<>();
     }
@@ -395,8 +461,12 @@ public class BiliLocalCrawlerProvider implements CommentProvider {
             return result;
         }
         if (mid.contains("BV")) {
-            return fetchViewAid(mid, cookie);
+            return resolveSeedWithRetry("BV->aid",
+                    () -> fetchViewAid(mid, cookie),
+                    target -> StringUtils.isNotBlank(target.get("oid")));
         }
-        return fetchDynamicCommentId(mid, cookie);
+        return resolveSeedWithRetry("动态->comment_id",
+                () -> fetchDynamicCommentId(mid, cookie),
+                target -> StringUtils.isNotBlank(target.get("oid")));
     }
 }

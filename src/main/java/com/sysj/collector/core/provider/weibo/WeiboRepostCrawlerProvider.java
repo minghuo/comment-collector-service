@@ -50,7 +50,6 @@ public class WeiboRepostCrawlerProvider implements CommentProvider {
     private static final HttpUtil httpUtil = HttpUtilProvider.localClient();
 
     private static final String API_URL = "https://weibo.com/ajax/statuses/repostTimeline";
-    private static final int RETRY = 3;
 
     @Override
     public String providerKey() {
@@ -81,41 +80,48 @@ public class WeiboRepostCrawlerProvider implements CommentProvider {
         boolean hasMore = false;
         String nextCursor = nextId;
 
-        for (int i = 0; i < RETRY; i++) {
-            try {
-                String body = httpUtil.getString(url, headers);
-                if (StringUtils.isNotBlank(body) && body.contains("next_cursor")) {
-                    nextCursor = CommonParser.getJsonPathOne(body, "$.next_cursor");
-                    int maxPage = CommonTools.stringToInteger(CommonParser.getJsonPathOne(body, "$.max_page"));
-                    if (maxPage == 0) {
-                        return CommonEntity.<Comment>builder()
-                                .haseMore(false).nextUrl(nextCursor)
-                                .status(CommonStatusEnum.STATUS_SUCCESS)
-                                .dataList(reposts)
-                                .build();
-                    }
-                    hasMore = page < maxPage;
-                    List<String> dataStrList = CommonParser.getJsonPathMany(body, "$.data");
-                    if (CollUtil.isNotEmpty(dataStrList)) {
-                        for (String dataStr : dataStrList) {
-                            if (StringUtils.isNotBlank(dataStr)) {
-                                reposts.add(Comment.buildFromWeiboRepost(dataStr));
-                            }
-                        }
-                    }
+        // 只发一次请求：重试归管线 RetryStage（providers[].max_retry 来自任务所用平台功能配置，
+        // 且每次重试重新过 RateLimitStage 领令牌），原 RETRY=3 的内层重试会绕开令牌桶、白耗 DPS。
+        try {
+            String body = httpUtil.getString(url, headers);
+            if (StringUtils.isNotBlank(body) && body.contains("next_cursor")) {
+                nextCursor = CommonParser.getJsonPathOne(body, "$.next_cursor");
+                int maxPage = CommonTools.stringToInteger(CommonParser.getJsonPathOne(body, "$.max_page"));
+                if (maxPage == 0) {
                     return CommonEntity.<Comment>builder()
-                            .haseMore(hasMore).nextUrl(nextCursor)
+                            .haseMore(false).nextUrl(nextCursor)
                             .status(CommonStatusEnum.STATUS_SUCCESS)
                             .dataList(reposts)
                             .build();
                 }
-            } catch (Exception e) {
-                log.warn("[weibo-repost] 第 {}/{} 次请求失败: {}", i + 1, RETRY, e.getMessage());
+                hasMore = page < maxPage;
+                List<String> dataStrList = CommonParser.getJsonPathMany(body, "$.data");
+                if (CollUtil.isNotEmpty(dataStrList)) {
+                    for (String dataStr : dataStrList) {
+                        if (StringUtils.isNotBlank(dataStr)) {
+                            reposts.add(Comment.buildFromWeiboRepost(dataStr));
+                        }
+                    }
+                }
+                return CommonEntity.<Comment>builder()
+                        .haseMore(hasMore).nextUrl(nextCursor)
+                        .status(CommonStatusEnum.STATUS_SUCCESS)
+                        .dataList(reposts)
+                        .build();
             }
+            log.warn("[weibo-repost] 响应不含 next_cursor: mid={} page={}", mid, page);
+            return CommonEntity.<Comment>builder()
+                    .haseMore(false).nextUrl(nextCursor)
+                    .status(CommonStatusEnum.STATUS_ERROR)
+                    .msg("响应不含 next_cursor")
+                    .build();
+        } catch (Exception e) {
+            log.warn("[weibo-repost] 请求失败: {}", e.getMessage());
+            return CommonEntity.<Comment>builder()
+                    .haseMore(false).nextUrl(nextCursor)
+                    .status(CommonStatusEnum.STATUS_ERROR)
+                    .msg(e.getMessage())
+                    .build();
         }
-        return CommonEntity.<Comment>builder()
-                .haseMore(false).nextUrl(nextCursor)
-                .status(CommonStatusEnum.STATUS_ERROR)
-                .build();
     }
 }

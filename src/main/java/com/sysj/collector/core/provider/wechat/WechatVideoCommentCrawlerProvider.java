@@ -49,7 +49,6 @@ public class WechatVideoCommentCrawlerProvider implements CommentProvider {
     private static final HttpUtil httpUtil = HttpUtilProvider.apiClient();
 
     private static final String COMMENT_URL = "api/v1/wechat-channels/video/comments";
-    private static final int RETRY = 3;
     private static final int PAGE_SIZE = 20;
 
     @Override
@@ -72,42 +71,49 @@ public class WechatVideoCommentCrawlerProvider implements CommentProvider {
         // 修 R8：video_id/comment_id 来自调用方 extra，必须 URL 编码后再拼 query
         // （last_buffer 原本就已编码，保持同一个编码器）
         String base = SyConstants.BASE_URL + COMMENT_URL + "?video_id=" + URLCodeUtil.getURLEncode(videoId);
-        for (int i = 0; i < RETRY; i++) {
-            try {
-                String apiUrl = base;
-                if (StringUtils.isNotBlank(buffer)) {
-                    apiUrl += "&last_buffer=" + URLCodeUtil.getURLEncode(buffer);
-                }
-                if (StringUtils.isNotBlank(commentId)) {
-                    apiUrl += "&comment_id=" + URLCodeUtil.getURLEncode(commentId);
-                }
-                String body = httpUtil.getString(apiUrl, ProviderHeaders.syHeaders(), false);
-                Integer code = CommonTools.stringToInteger(CommonParser.getJsonPathOne(body, "$.code"));
-                if (code == 200) {
-                    List<String> commentStrList = CommonParser.getJsonPathMany(body, "$.data.comments");
-                    String nextBuffer = CommonParser.getJsonPathOne(body, "$.data.last_buffer");
-                    String hasMoreStr = CommonParser.getJsonPathOne(body, "$.data.has_more");
-                    List<Comment> comments = new ArrayList<>();
-                    for (String commentStr : commentStrList) {
-                        comments.add(Comment.buildFromWechatVideo(commentStr, commentId));
-                    }
-                    boolean hasMore = "true".equals(hasMoreStr)
-                            || (comments.size() >= PAGE_SIZE && StringUtils.isNotBlank(nextBuffer));
-                    return CommonEntity.<Comment>builder()
-                            .haseMore(hasMore)
-                            .nextUrl(nextBuffer)
-                            .status(CommonStatusEnum.STATUS_SUCCESS)
-                            .dataList(comments)
-                            .build();
-                }
-            } catch (Exception e) {
-                CommonTools.sleep(1000);
-                log.warn("[wechat-video-sy] 第 {}/{} 次获取视频评论失败: videoId={} error={}", i + 1, RETRY, videoId, e.getMessage());
+        // 只发一次请求：重试归管线 RetryStage（providers[].max_retry 来自任务所用平台功能配置，
+        // 且每次重试重新过 RateLimitStage 领令牌），原 RETRY=3 的内层重试会绕开令牌桶、白耗 DPS。
+        try {
+            String apiUrl = base;
+            if (StringUtils.isNotBlank(buffer)) {
+                apiUrl += "&last_buffer=" + URLCodeUtil.getURLEncode(buffer);
             }
+            if (StringUtils.isNotBlank(commentId)) {
+                apiUrl += "&comment_id=" + URLCodeUtil.getURLEncode(commentId);
+            }
+            String body = httpUtil.getString(apiUrl, ProviderHeaders.syHeaders(), false);
+            Integer code = CommonTools.stringToInteger(CommonParser.getJsonPathOne(body, "$.code"));
+            if (code == 200) {
+                List<String> commentStrList = CommonParser.getJsonPathMany(body, "$.data.comments");
+                String nextBuffer = CommonParser.getJsonPathOne(body, "$.data.last_buffer");
+                String hasMoreStr = CommonParser.getJsonPathOne(body, "$.data.has_more");
+                List<Comment> comments = new ArrayList<>();
+                for (String commentStr : commentStrList) {
+                    comments.add(Comment.buildFromWechatVideo(commentStr, commentId));
+                }
+                boolean hasMore = "true".equals(hasMoreStr)
+                        || (comments.size() >= PAGE_SIZE && StringUtils.isNotBlank(nextBuffer));
+                return CommonEntity.<Comment>builder()
+                        .haseMore(hasMore)
+                        .nextUrl(nextBuffer)
+                        .status(CommonStatusEnum.STATUS_SUCCESS)
+                        .dataList(comments)
+                        .build();
+            }
+            log.warn("[wechat-video-sy] 获取视频评论失败: videoId={} code={} msg={}", videoId, code,
+                    CommonParser.getJsonPathOne(body, "$.msg"));
+            return CommonEntity.<Comment>builder()
+                    .haseMore(false)
+                    .status(CommonStatusEnum.STATUS_ERROR)
+                    .msg("上游失败 code=" + code)
+                    .build();
+        } catch (Exception e) {
+            log.warn("[wechat-video-sy] 获取视频评论失败: videoId={} error={}", videoId, e.getMessage());
+            return CommonEntity.<Comment>builder()
+                    .haseMore(false)
+                    .status(CommonStatusEnum.STATUS_ERROR)
+                    .msg(e.getMessage())
+                    .build();
         }
-        return CommonEntity.<Comment>builder()
-                .haseMore(false)
-                .status(CommonStatusEnum.STATUS_ERROR)
-                .build();
     }
 }

@@ -42,16 +42,18 @@ public final class HttpUtilProvider {
     /**
      * HTTP 层最大尝试次数（含首次）。
      *
-     * <p><b>为什么显式收敛为 1（= 不重试）</b>：库默认 {@code maxRetry=3}，而本项目已经在
-     * <b>两个更懂语义</b>的层次重试：
+     * <p><b>为什么显式收敛为 1（= 不重试）</b>：库默认 {@code maxRetry=3}，而本项目现在只有
+     * <b>唯一一处、更懂语义</b>的重试点：管线 {@code RetryStage}。
      * <ol>
-     *   <li>Provider 内层：按业务判据重试 3 次（响应是否含 {@code comments}、上游 {@code code} 是否 200）；</li>
-     *   <li>管线 {@code RetryStage}：按异常重试平台功能配置的 {@code maxRetry}（缺省 2 ⇒ 共 3 次尝试），
-     *       且这是 DB 可调的业务旋钮。</li>
+     *   <li>供应商实现：<b>只发一次请求</b>（原内层 {@code RETRY = 3} 已删除），失败统一以
+     *       {@code status != STATUS_SUCCESS} 或异常上抛；</li>
+     *   <li>管线 {@code RetryStage}：按任务所用平台功能配置的 {@code maxRetry} 重试，
+     *       这是 DB/接口可调的业务旋钮，且每次重试都重新过 {@code RateLimitStage} 领令牌；</li>
+     *   <li>HTTP 层：本常量 = 1，不重试。</li>
      * </ol>
-     * 三层各 3 次相乘 ⇒ 最坏情况下<b>单个子任务的一次尝试会向上游发出 27 次 HTTP 请求</b>（3×3×3）。
+     * 三层若各自重试 3 次，最坏情况下<b>单个子任务的一次尝试会向上游发出 27 次 HTTP 请求</b>（3×3×3）。
      * 上游看到的是"同一来源短时间猛打"，极易触发封禁/限频 —— 这是"重试乘数叠加"缺陷的成因。
-     * HTTP 层是最不可见、也最不懂业务判据的一层，故收敛为不重试：最坏 3×3×1 = 9 次。
+     * 现在只有管线一层可重试：最坏 maxRetry+1 次，且每次都占用一次限流令牌，供应商 DPS 始终可控。
      *
      * <p>改这个值前先确认上层重试仍覆盖瞬时故障。{@code maxRetry(1)} 合法：
      * 库内 {@code RetryPolicy} 取 {@code Math.max(1, maxAttempts)}。

@@ -39,9 +39,16 @@ public final class LinkPlatformRouter {
             url -> StringUtils.isNotBlank(WeiboTool.urlToMid(url))
                     && StringUtils.isBlank(WeiboTool.videoUrlToMid(url));
 
-    private static final Predicate<String> WEIBO_ANY_URL =
-            url -> StringUtils.isNotBlank(WeiboTool.urlToMid(url))
-                    || StringUtils.isNotBlank(WeiboTool.videoUrlToMid(url));
+    /** 头条文章链接（PC/手机端/card 页）：文章 id 不是 mid，本地采集经文章页配置换算（Golaxy 不支持） */
+    private static final Predicate<String> WEIBO_ARTICLE_URL = url ->
+            url.contains("ttarticle") || url.contains("card.weibo.com/article");
+
+    /** 微博可采集链接全集：普通状态 / 视频 / 头条文章（含手机端形态） */
+    private static final Predicate<String> WEIBO_ANY_URL = url ->
+            StringUtils.isNotBlank(WeiboTool.urlToMid(url))
+                    || StringUtils.isNotBlank(WeiboTool.videoUrlToMid(url))
+                    || WEIBO_ARTICLE_URL.test(url)
+                    || url.contains("m.weibo.cn/video/");
 
     private static final Predicate<String> BILI_URL = url -> url.contains("bilibili.com");
 
