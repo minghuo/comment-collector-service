@@ -174,19 +174,24 @@ public class CommentController {
     /**
      * 混合平台链接自动分派：按链接特征识别平台，拆分为各平台主任务。
      *
-     * <p>微博等双供应商平台按 cookie 有无路由（有 → 本地采集，无 → Golaxy 渠道）；
-     * 未接入平台的链接归入 unsupportedUrls；功能未开启/队列已满的分组归入 skipped 并注明原因。
-     * 同批各平台主任务共享 dispatchId，可用 {@link #dispatchBatchStatus(String)} 聚合查询进度。
+     * <p>微博、B站等双供应商平台按 cookie 有无路由（有 → 本地采集，无 → Golaxy 渠道）；
+     * 未接入平台的链接、非法链接都逐条返回错误码与原因（{@code invalidUrls} / {@code unsupportedLinks} /
+     * {@code linkResults}），不再静默丢弃。
+     *
+     * <p>HTTP 状态码由 {@link LinkDispatchStatus} 决定：有任务建成 200；全非法 400；
+     * 平台未接入/链接形态不支持/功能未开启 422；队列已满 503。
+     * 部分成功同样返回 200，失败的分组在 {@code skipped}，失败链接在 {@code linkResults} 里逐条标注。
      */
     @PostMapping("/collect/dispatch")
     @Operation(summary = "混合平台链接自动分派",
-            description = "提交混合平台链接，自动识别平台并拆分为各平台异步任务；返回批次ID与各平台子任务")
+            description = "提交混合平台链接，自动识别平台并拆分为各平台异步任务；"
+                    + "返回批次ID、各平台子任务、逐链接判定与错误码（200/400/422/503）")
     public ResponseEntity<LinkDispatchResult> dispatchLinks(@RequestBody LinkDispatchRequest request) {
         log.info("混合平台自动分派请求: userId={} links={}",
                 request == null ? null : request.getUserId(),
                 request == null || request.getLinks() == null ? 0 : request.getLinks().size());
         LinkDispatchResult result = linkDispatchService.dispatch(request);
-        return ResponseEntity.ok(result);
+        return ResponseEntity.status(LinkDispatchStatus.resolve(result)).body(result);
     }
 
     /**

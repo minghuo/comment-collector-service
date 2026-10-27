@@ -3,6 +3,7 @@ package com.sysj.collector.core.router;
 import com.bewilder.filter.CommonExtractor;
 import com.bewilder.weibo.WeiboTool;
 import com.sysj.collector.core.provider.Capability;
+import com.sysj.collector.model.DispatchErrorCodes;
 import org.apache.commons.lang3.StringUtils;
 
 import java.util.List;
@@ -97,6 +98,9 @@ public final class LinkPlatformRouter {
     private static final Predicate<String> YOUTUBE_URL = url ->
             url.contains("youtube.com") || url.contains("youtu.be");
 
+    /** 合法链接：仅 http/https，且不含空白（宽松够用，真实可达性由供应商决定）。 */
+    private static final Pattern HTTP_URL = Pattern.compile("^(?i)https?://\\S+$");
+
     /** 单条路由规则：无能力约束的普通平台。 */
     private static RouteRule rule(String platformName, String platformCode, String featureCode,
                                   Predicate<String> matcher) {
@@ -188,6 +192,68 @@ public final class LinkPlatformRouter {
             }
         }
         return null;
+    }
+
+    /**
+     * 逐链接判定：给出路由结果，或在无法路由时给出**可枚举的错误码与原因**。
+     *
+     * <p>与 {@link #route(String, boolean)} 的区别：{@code route} 只回答"能不能"，本方法还回答"为什么不能"，
+     * 且能区分三种失败：链接本身非法、平台未接入、平台已接入但该链接形态不支持
+     * （典型：微博视频链接未提供 cookie，视频只有本地采集支持）。
+     *
+     * @param url       调用方提交的链接（尚未清洗）
+     * @param hasCookie 请求是否携带 cookie
+     * @return 判定结果，永不返回 null；{@link Classification#supported()} 为 true 时 {@link Classification#route()} 非空
+     */
+    public static Classification classify(String url, boolean hasCookie) {
+        if (StringUtils.isBlank(url)) {
+            return new Classification(null, DispatchErrorCodes.INVALID_LINK, "链接为空");
+        }
+        if (!HTTP_URL.matcher(url).matches()) {
+            return new Classification(null, DispatchErrorCodes.INVALID_LINK,
+                    "不是合法的 http/https 链接: " + url);
+        }
+        Route route = route(url, hasCookie);
+        if (route != null) {
+            return new Classification(route, null, null);
+        }
+        // 平台规则命中但当前 cookie 模式不匹配 ⇒ 平台已接入、链接形态不支持
+        for (RouteRule rule : RULES) {
+            if (rule.matches(url, !hasCookie)) {
+                String tip = hasCookie
+                        ? "带 cookie 时只支持需登录的链接形态"
+                        : "未提供 cookie 时该链接形态无可用供应商";
+                return new Classification(null, DispatchErrorCodes.LINK_UNSUPPORTED,
+                        "平台「" + rule.platformName() + "」已接入，但该链接暂不支持：" + tip);
+            }
+        }
+        return new Classification(null, DispatchErrorCodes.PLATFORM_UNSUPPORTED,
+                "未接入该链接所属平台: " + hostOf(url));
+    }
+
+    /** 取链接 host 用于错误提示；解析失败时退回原串截断。 */
+    private static String hostOf(String url) {
+        try {
+            String host = java.net.URI.create(url).getHost();
+            return StringUtils.isNotBlank(host) ? host : StringUtils.abbreviate(url, 80);
+        } catch (Exception e) {
+            return StringUtils.abbreviate(url, 80);
+        }
+    }
+
+    /**
+     * 链接判定结果。
+     *
+     * @param route     路由结果（成功时非空）
+     * @param errorCode 失败时的错误码，见 {@link DispatchErrorCodes}
+     * @param reason    失败时的可展示原因
+     */
+    public record Classification(Route route, String errorCode, String reason) {
+
+        /** 是否可路由到某个平台。 */
+        public boolean supported() {
+            return route != null;
+        }
     }
 
     /**

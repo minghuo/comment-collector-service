@@ -1,6 +1,7 @@
 package com.sysj.collector.core.router;
 
 import com.sysj.collector.core.provider.Capability;
+import com.sysj.collector.model.DispatchErrorCodes;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -102,6 +103,44 @@ class LinkPlatformRouterTest {
         assertNull(LinkPlatformRouter.route("https://b23.tv/abcXYZ", false));
         assertNull(LinkPlatformRouter.route("", false));
         assertNull(LinkPlatformRouter.route(null, false));
+    }
+
+    @Test
+    void classifySupportedLinkCarriesRouteAndNoError() {
+        LinkPlatformRouter.Classification c = LinkPlatformRouter.classify(TOUTIAO_POST, true);
+        assertTrue(c.supported());
+        assertEquals("toutiao", c.route().platformCode());
+        assertNull(c.errorCode());
+        assertNull(c.reason());
+    }
+
+    @Test
+    void classifyBlankOrNonHttpLinkIsInvalid() {
+        // 空串 / 非 http 协议：与"平台未接入"区分开，调用方改链接即可重试
+        assertEquals(DispatchErrorCodes.INVALID_LINK, LinkPlatformRouter.classify("", true).errorCode());
+        assertEquals(DispatchErrorCodes.INVALID_LINK, LinkPlatformRouter.classify(null, true).errorCode());
+        assertEquals(DispatchErrorCodes.INVALID_LINK,
+                LinkPlatformRouter.classify("ftp://example.com/a.mp4", true).errorCode());
+        assertEquals(DispatchErrorCodes.INVALID_LINK,
+                LinkPlatformRouter.classify("www.toutiao.com/w/1/", true).errorCode());
+    }
+
+    @Test
+    void classifyUnknownDomainIsPlatformUnsupported() {
+        LinkPlatformRouter.Classification c =
+                LinkPlatformRouter.classify("https://www.baidu.com/s?wd=test", true);
+        assertNull(c.route());
+        assertEquals(DispatchErrorCodes.PLATFORM_UNSUPPORTED, c.errorCode());
+        assertTrue(c.reason().contains("baidu.com"), c.reason());
+    }
+
+    @Test
+    void classifyVideoLinkWithoutCookieIsLinkUnsupported() {
+        // 平台已接入（微博），但无 cookie 时视频链接没有可用供应商：要说清是"形态不支持"
+        LinkPlatformRouter.Classification c = LinkPlatformRouter.classify(WEIBO_VIDEO, false);
+        assertNull(c.route());
+        assertEquals(DispatchErrorCodes.LINK_UNSUPPORTED, c.errorCode());
+        assertTrue(c.reason().contains("微博"), c.reason());
     }
 
     private void assertRoute(String platformCode, String url, boolean hasCookie) {
