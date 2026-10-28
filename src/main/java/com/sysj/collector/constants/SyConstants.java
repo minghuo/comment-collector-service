@@ -1,12 +1,22 @@
 package com.sysj.collector.constants;
 
 
+import com.sysj.collector.config.CommonConfig;
+
 public class SyConstants {
 
-    public static final String BASE_URL = "https://auto.sysjdata.com/api_hub/";
+    /**
+     * 接口基础链接（原硬编码常量，现迁移到配置项 sy.base.url，便于轮换）
+     */
+    public static String getBaseUrl(){
+        return CommonConfig.syBaseUrl;
+    }
 
-    public static final String TOKEN = "Bearer SYC123XYZ456DEF789";
-
-
+    /**
+     * 接口鉴权 Token（原硬编码常量，现迁移到配置项 sy.api.token，便于轮换）
+     */
+    public static String getToken() {
+        return CommonConfig.syToken;
+    }
 
 }
