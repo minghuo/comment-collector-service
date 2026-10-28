@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  日志配置（Logback）。Spring Boot 的日志后端是 Logback（pom 未引入 log4j2），
+  所以只有本文件生效；仓库里遗留的 log4j2.xml 从未被加载过（无 Log/ 目录、格式是 Logback 默认式样），已删除。
+
+  原则：业务与故障信号保持 INFO/WARN，框架与驱动的过程性 INFO 压到 WARN。
+  日志只输出到控制台（生产由 supervisor 收集 stdout），不再额外落盘，避免与运维采集重复占盘。
+  需要临时放开某类日志时，用启动参数覆盖即可，例如 logging.level.org.mongodb.driver=INFO（作为 spring-boot.run.arguments 传入）。
+-->
+<configuration>
+
+    <property name="LOG_PATTERN"
+              value="%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %5p ${PID:- } --- [%15.15t] %-40.40logger{39} : %m%n"/>
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- MongoDB 驱动：心跳、连接池维护、Waiting for server to become available、监控线程异常栈
+         全部是 INFO 级，库不可用时每 10 秒刷一大段。降为 WARN 后只在真告警时输出。 -->
+    <logger name="org.mongodb.driver" level="WARN"/>
+    <logger name="com.mongodb" level="WARN"/>
+    <logger name="org.springframework.data.mongodb" level="WARN"/>
+
+    <!-- Web 容器与框架的过程性日志 -->
+    <logger name="org.springframework.web" level="WARN"/>
+    <logger name="org.springframework.data.repository.config" level="WARN"/>
+    <logger name="org.apache.coyote" level="WARN"/>
+    <logger name="org.apache.tomcat.util.net" level="WARN"/>
+    <logger name="org.springframework.boot.web.embedded.tomcat" level="WARN"/>
+
+    <!-- HTTP 客户端与 Excel 解析：每次调用的请求/响应明细只在 DEBUG 有用 -->
+    <logger name="org.apache.http" level="WARN"/>
+    <logger name="okhttp3" level="WARN"/>
+    <logger name="com.sysj.http" level="WARN"/>
+    <logger name="cn.hutool" level="WARN"/>
+    <logger name="cn.idev.excel" level="WARN"/>
+    <logger name="com.alibaba.excel" level="WARN"/>
+
+    <!-- 指标与连接池 -->
+    <logger name="io.micrometer" level="WARN"/>
+    <logger name="com.zaxxer.hikari" level="WARN"/>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+
+</configuration>

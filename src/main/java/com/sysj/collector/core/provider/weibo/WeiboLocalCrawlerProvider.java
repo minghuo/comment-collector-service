@@ -229,7 +229,7 @@ public class WeiboLocalCrawlerProvider implements CommentProvider {
         if (StringUtils.isBlank(cookie)) {
             throw new CollectorException("微博评论采集缺少 Cookie（extra.cookie），微博接口必须登录态");
         }
-        log.info("[weibo-local] 评论采集: mid={} uid={} sort={} maxId={} parentCommentId={}", mid, uid, sort, maxId, parentCommentId);
+        log.debug("[weibo-local] 评论采集: mid={} uid={} sort={} maxId={} parentCommentId={}", mid, uid, sort, maxId, parentCommentId);
 
         int isMix = parentCommentId != null ? 1 : 0;
         int fetchLevel = parentCommentId != null ? 1 : 0;
