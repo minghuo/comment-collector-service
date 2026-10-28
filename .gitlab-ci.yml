@@ -1,0 +1,35 @@
+  
+before_script:
+  - |
+    # 时间版本号
+    BUILD_TIME=$(date +"%Y%m%d-%H%M%S")
+    # 包含分支信息
+    BRANCH_NAME=$(echo "$CI_COMMIT_REF_NAME" | sed 's/[^a-zA-Z0-9]/-/g')
+    VERSION="${BRANCH_NAME}-${BUILD_TIME}"
+    echo "完整版本: $VERSION"
+
+stages:
+  - copy
+  - deploy
+
+copy-jar:
+  stage: copy
+  tags:
+    - shell
+  script:
+    - echo "cp files"
+    - sh /home/gitlab-runner/shell/deploy_jar.sh $CI_PROJECT_NAME
+  environment: production
+  only:
+    - master
+
+deploy-prod:
+  stage: deploy
+  tags:
+    - shell
+  script:
+    - echo "restart project"
+    - python /home/gitlab-runner/shell/supervisorctl.py 192.168.0.2 $CI_PROJECT_NAME
+  environment: production
+  only:
+    - master
