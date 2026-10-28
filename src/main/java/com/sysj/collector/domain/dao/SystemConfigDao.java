@@ -1,5 +1,6 @@
 package com.sysj.collector.domain.dao;
 
+import com.mongodb.client.result.UpdateResult;
 import com.sysj.collector.domain.document.SystemConfig;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
@@ -52,6 +53,39 @@ public class SystemConfigDao {
             update.set("description", description);
         }
         mongoTemplate.upsert(query, update, SystemConfig.class);
+    }
+
+    /**
+     * 键不存在时插入默认值（{@code $setOnInsert}），已存在则完全不动。
+     *
+     * <p>与 {@code db/init-comment-collector.js} 的播种口径一致：只补缺、不覆盖人工改过的值。
+     *
+     * @return true = 本次真的插入了新键；false = 键已存在（未改动）
+     */
+    public boolean insertIfAbsent(String key, String value, String description) {
+        Query query = new Query(Criteria.where("_id").is(key));
+        Update update = new Update()
+                .setOnInsert("value", value)
+                .setOnInsert("description", description)
+                .setOnInsert("updateTime", Instant.now());
+        UpdateResult result = mongoTemplate.upsert(query, update, SystemConfig.class);
+        return result.getUpsertedId() != null;
+    }
+
+    /**
+     * 集合是否存在。
+     *
+     * <p>首次发布的库执行本服务前根本不会有该集合（Mongo 按需建集合），
+     * 需要在播种前区分「集合不存在 → 空库」与「集合存在但键缺失」两种情况以便日志说明。
+     */
+    public boolean collectionExists() {
+        String expected = mongoTemplate.getCollectionName(SystemConfig.class);
+        for (String name : mongoTemplate.getDb().listCollectionNames()) {
+            if (expected.equals(name)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** 删除配置（回到 properties 默认）。 */
