@@ -48,7 +48,7 @@ class ProviderAutoRegistrationTest {
     // ── 测试桩：新供应商（vivo，注解齐全）与旧式供应商（无注解，应跳过） ──
 
     @ProviderMeta(platform = "vivo_bbs", feature = "comment", name = "vivo社区-本地爬虫",
-            featureName = "vivo社区评论采集")
+            featureName = "vivo社区评论采集", ratePerSecond = 0.5)
     @ProviderCapability({ Capability.COMMENT, Capability.CURSOR_PAGING, Capability.SYNC_SUPPORTED })
     static class VivoStubProvider implements CommentProvider {
         @Override

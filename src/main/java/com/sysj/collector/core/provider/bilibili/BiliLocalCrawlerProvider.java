@@ -86,7 +86,7 @@ public class BiliLocalCrawlerProvider implements CommentProvider {
                 : extra.get("next");
         String commentId = extra.get("commentId");
         String mid = resolveOid(extra.get("mid"), request.getFromUrl(), request.getTargetId());
-        log.info("[bili-local] 采集开始: mid={} commentId={} hasCookie={} cursor有参={}",
+        log.debug("[bili-local] 采集开始: mid={} commentId={} hasCookie={} cursor有参={}",
                 mid, commentId, StringUtils.isNotBlank(cookie), StringUtils.isNotBlank(next));
 
         if (StringUtils.isBlank(cookie) || !cookie.contains("bili_ticket")) {

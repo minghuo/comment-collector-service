@@ -145,7 +145,13 @@ public class SupplierRegistrySyncService {
 
         SyncReport report = new SyncReport(registration[0], registration[1],
                 configuredKeys.size(), added, tierEntries, staleKeys);
-        log.info("供应商注册表同步完成: {}", report);
+        // 巡检每 5 分钟一次，绝大多数轮次啥也没变；无变化只在 DEBUG 留痕，避免刷屏
+        if (report.providersRegistered() == 0 && report.supplierStatesAdded() == 0
+                && report.tierFeatureEntriesAdded() == 0) {
+            log.debug("供应商注册表同步完成(无变化): {}", report);
+        } else {
+            log.info("供应商注册表同步完成: {}", report);
+        }
         return report;
     }
 

@@ -297,7 +297,7 @@ public class TaskManagementService implements TaskResultListener {
         }
         if (!claimed) {
             Integer retryCount = subTask.getRetryCount();
-            log.info("子任务已被其它实例领取或已终态，跳过本次投递: subTaskId={} status={} retryCount={}",
+            log.debug("子任务已被其它实例领取或已终态，跳过本次投递: subTaskId={} status={} retryCount={}",
                     subTask.getId(), subTask.getStatus(), retryCount == null ? 0 : retryCount);
             return;
         }
@@ -332,7 +332,7 @@ public class TaskManagementService implements TaskResultListener {
         // 条件抢占：多实例部署下每个实例的扫描都会读到同一批到期子任务，
         // 只有把 RETRYING 成功改成 RUNNING 的那个实例可以入队，其余静默跳过（无需分布式锁）。
         if (!subTaskDao.markRunningIfRetrying(subTask.getId())) {
-            log.info("子任务已被其它实例领取或已终态，跳过本次重投: subTaskId={}", subTask.getId());
+            log.debug("子任务已被其它实例领取或已终态，跳过本次重投: subTaskId={}", subTask.getId());
             return;
         }
         subTask.setStatus(ST_RUNNING);
@@ -411,7 +411,7 @@ public class TaskManagementService implements TaskResultListener {
             boolean first = subTaskDao.markTerminalIfFirst(subTaskId, ST_SUCCESS,
                     result.getProviderUsed(), buildResultSummary(result), null);
             if (!first) {
-                log.info("子任务已是终态，重复投递幂等跳过: subTaskId={}", subTaskId);
+                log.debug("子任务已是终态，重复投递幂等跳过: subTaskId={}", subTaskId);
                 return;
             }
 
@@ -446,7 +446,7 @@ public class TaskManagementService implements TaskResultListener {
         if (markSubTaskFailed(subTask, errorMessage)) {
             recordOutcomeAndFinish(masterTaskId, false);
         } else {
-            log.info("子任务已是终态，重复投递幂等跳过: subTaskId={}", subTaskId);
+            log.debug("子任务已是终态，重复投递幂等跳过: subTaskId={}", subTaskId);
         }
     }
 

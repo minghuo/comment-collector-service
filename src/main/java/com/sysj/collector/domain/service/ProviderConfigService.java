@@ -84,7 +84,7 @@ public class ProviderConfigService {
      */
     @CacheEvict(value = "featureConfig", key = "#platformCode + ':' + #featureCode")
     public void evictFeatureCache(String platformCode, String featureCode) {
-        log.info("缓存已淘汰: platform={} feature={}", platformCode, featureCode);
+        log.debug("缓存已淘汰: platform={} feature={}", platformCode, featureCode);
     }
 
     /**

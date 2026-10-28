@@ -2,6 +2,7 @@ package com.sysj.collector.controller;
 
 import com.sysj.collector.config.ApiKeyAuthenticator;
 import com.sysj.collector.domain.document.SystemConfig;
+import com.sysj.collector.domain.service.ConfigBootstrapService;
 import com.sysj.collector.domain.service.SupplierRegistrySyncService;
 import com.sysj.collector.domain.service.SystemConfigService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -33,7 +34,8 @@ import java.util.regex.Pattern;
  * <h3>修 R5：本接口此前是完全开放的</h3>
  * <ul>
  *   <li><b>写保护</b>：{@code collector.config.protect-writes=true} 后，写操作
- *       （PUT/DELETE {@code /api/config/{key}}、POST {@code /api/config/sync-registry}）
+ *       （PUT/DELETE {@code /api/config/{key}}、POST {@code /api/config/sync-registry}、
+ *       POST {@code /api/config/bootstrap}）
  *       必须携带 {@code collector.auth.admin-keys} 里的管理员密钥，否则 403。
  *       缺省 false ⇒ 存量运维脚本行为不变。</li>
  *   <li><b>读脱敏</b>：键名疑似承载机密（secret/password/token/api-key/credential）时，
@@ -60,6 +62,7 @@ public class SystemConfigController {
 
     private final SystemConfigService systemConfigService;
     private final SupplierRegistrySyncService registrySyncService;
+    private final ConfigBootstrapService configBootstrapService;
     private final ApiKeyAuthenticator apiKeyAuthenticator;
 
     /** 配置写保护开关（修 R5），缺省关闭。 */
@@ -166,6 +169,56 @@ public class SystemConfigController {
         resp.put("supplierStatesAdded", report.supplierStatesAdded());
         resp.put("tierFeatureEntriesAdded", report.tierFeatureEntriesAdded());
         resp.put("staleKeys", report.staleKeys());
+        resp.put("message", report.toString());
+        return ResponseEntity.ok(resp);
+    }
+
+    /**
+     * 配置基线自举状态：启动时对 {@code system_config} / {@code user_tier_config} 的校验与补种结果。
+     *
+     * <p>项目初次发布（新库、漏跑 init 脚本、dump 恢复不全）时，这两个集合缺失不会报错，
+     * 只会静默退回默认值/全局排序 —— 本接口用于事后核对"到底补齐了没有"。
+     * 未执行过（自举关闭或启动还没走到）时返回 {@code checked=false}。
+     */
+    @GetMapping("/bootstrap-status")
+    @Operation(summary = "查询配置基线自举状态",
+            description = "返回启动时两个集合的存在性、基线缺口与补种条数；checked=false 表示尚未执行")
+    public ResponseEntity<Map<String, Object>> bootstrapStatus() {
+        ConfigBootstrapService.BootstrapReport report = configBootstrapService.lastReport();
+        Map<String, Object> resp = new HashMap<>();
+        if (report == null) {
+            resp.put("checked", false);
+            resp.put("message", "尚未执行配置基线自举（collector.bootstrap.enabled=false 或启动未完成）");
+            return ResponseEntity.ok(resp);
+        }
+        resp.put("checked", true);
+        resp.put("healthy", report.healthy());
+        resp.put("skipped", report.skipped());
+        resp.put("time", report.time());
+        resp.put("reason", report.reason());
+        resp.put("baselines", report.baselines());
+        resp.put("message", report.toString());
+        return ResponseEntity.ok(resp);
+    }
+
+    /**
+     * 手动重跑配置基线校验与补种（幂等，只补缺不覆盖）。
+     *
+     * <p>换库 / 从 dump 恢复 / 手工删过配置之后可立即执行，无需重启；
+     * 会写 DB，因此与其它写操作同门槛（{@code protect-writes=true} 时需管理员密钥）。
+     */
+    @PostMapping("/bootstrap")
+    @Operation(summary = "手动重跑配置基线校验与补种",
+            description = "幂等：只补 system_config 缺失键与 user_tier_config 缺失等级，已存在的内容不动")
+    public ResponseEntity<Map<String, Object>> bootstrap(HttpServletRequest request) {
+        if (writeDenied(request)) {
+            return forbidden();
+        }
+        ConfigBootstrapService.BootstrapReport report = configBootstrapService.bootstrap();
+        Map<String, Object> resp = new HashMap<>();
+        resp.put("success", report.healthy());
+        resp.put("healthy", report.healthy());
+        resp.put("baselines", report.baselines());
         resp.put("message", report.toString());
         return ResponseEntity.ok(resp);
     }
