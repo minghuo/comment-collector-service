@@ -70,7 +70,7 @@ public class WechatVideoCommentCrawlerProvider implements CommentProvider {
 
         // 修 R8：video_id/comment_id 来自调用方 extra，必须 URL 编码后再拼 query
         // （last_buffer 原本就已编码，保持同一个编码器）
-        String base = SyConstants.BASE_URL + COMMENT_URL + "?video_id=" + URLCodeUtil.getURLEncode(videoId);
+        String base = SyConstants.getBaseUrl() + COMMENT_URL + "?video_id=" + URLCodeUtil.getURLEncode(videoId);
         // 只发一次请求：重试归管线 RetryStage（providers[].max_retry 来自任务所用平台功能配置，
         // 且每次重试重新过 RateLimitStage 领令牌），原 RETRY=3 的内层重试会绕开令牌桶、白耗 DPS。
         try {

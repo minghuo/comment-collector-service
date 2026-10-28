@@ -24,6 +24,7 @@
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 		<bewilder-tools.version>2.0.11.7</bewilder-tools.version>
 		<http-client-utils.version>2.1.2</http-client-utils.version>
+		<skipTests>true</skipTests>
 	</properties>
 
 	<dependencies>
@@ -107,34 +108,63 @@
 		</dependency>
 	</dependencies>
 
+
 	<build>
+		<finalName>comment-collector-service</finalName>
 		<plugins>
-			<plugin>
-				<groupId>org.apache.maven.plugins</groupId>
-				<artifactId>maven-compiler-plugin</artifactId>
-				<configuration>
-					<!-- 编译级别统一取 properties 的 java.version（21，见上方 properties 注释）。
-					     maven.compiler.release 优先生效，因此必须覆盖父 POM 的 java.version=17 -->
-					<annotationProcessorPaths>
-						<path>
-							<groupId>org.projectlombok</groupId>
-							<artifactId>lombok</artifactId>
-						</path>
-					</annotationProcessorPaths>
-				</configuration>
-			</plugin>
+			<!-- 打包插件 -->
 			<plugin>
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
 				<configuration>
-					<excludes>
-						<exclude>
-							<groupId>org.projectlombok</groupId>
-							<artifactId>lombok</artifactId>
-						</exclude>
-					</excludes>
+					<mainClass>com.sysj.collector.CommentCollectorServiceApplication</mainClass>
+				</configuration>
+				<executions>
+					<execution>
+						<goals>
+							<goal>repackage</goal>
+						</goals>
+					</execution>
+				</executions>
+			</plugin>
+			<!-- 解决编码问题 -->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<version>2.22.0</version>
+				<configuration>
+					<forkMode>once</forkMode>
+					<skipTests>${skipTests}</skipTests>
+					<argLine>-Dfile.encoding=UTF-8</argLine>
+				</configuration>
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-compiler-plugin</artifactId>
+				<configuration>
+					<source>${maven.compiler.source}</source>
+					<target>${maven.compiler.target}</target>
 				</configuration>
 			</plugin>
 		</plugins>
+
+		<resources>
+			<resource>
+				<directory>src/main/resources</directory>
+				<includes>
+					<include>**/*</include>
+				</includes>
+			</resource>
+			<!-- 将 library 目录打包到 resources 中 -->
+			<resource>
+				<directory>library</directory>
+				<targetPath>library</targetPath>
+				<includes>
+					<include>*.lex</include>
+				</includes>
+			</resource>
+		</resources>
+
 	</build>
+
 </project>

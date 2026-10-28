@@ -22,7 +22,7 @@ public final class ProviderHeaders {
      */
     public static Map<String, String> syHeaders() {
         Map<String, String> headers = new HashMap<>();
-        headers.put("Authorization", SyConstants.TOKEN);
+        headers.put("Authorization", SyConstants.getToken());
         return headers;
     }
 

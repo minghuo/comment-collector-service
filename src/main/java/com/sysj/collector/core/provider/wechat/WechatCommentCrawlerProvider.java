@@ -82,7 +82,7 @@ public class WechatCommentCrawlerProvider implements CommentProvider {
         String normalized = url.startsWith("http://") ? url.replace("http://", "https://") : url;
         log.info("[wechat-sy] 文章评论采集: url={} commentId={} buffer={}", normalized, commentId, buffer);
 
-        String base = SyConstants.BASE_URL + COMMENT_URL + "?url=" + URLCodeUtil.getURLEncode(normalized);
+        String base = SyConstants.getBaseUrl() + COMMENT_URL + "?url=" + URLCodeUtil.getURLEncode(normalized);
         // 只发一次请求：重试归管线 RetryStage（providers[].max_retry 来自任务所用平台功能配置，
         // 且每次重试重新过 RateLimitStage 领令牌），原 RETRY=3 的内层重试会绕开令牌桶、白耗 DPS。
         try {
