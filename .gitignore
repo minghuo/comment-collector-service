@@ -41,3 +41,16 @@ build/
 
 ### ZCode 会话本地文件 ###
 .zcode/
+
+### 构建/打包产物（mvn package 输出 target/，CI 复制到 jar/，均不入库） ###
+jar/
+*.jar
+*.war
+*.class
+
+### 本地临时文件与运行日志 ###
+.tmp/
+logs/
+*.log
+.DS_Store
+Thumbs.db
