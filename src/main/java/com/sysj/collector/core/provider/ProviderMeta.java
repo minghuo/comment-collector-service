@@ -39,7 +39,7 @@ public @interface ProviderMeta {
     String featureName() default "";
 
     /** 新条目的令牌桶速率（permits/秒）初值。 */
-    double ratePerSecond() default 0.5;
+    double ratePerSecond() default 1;
 
     /** 新条目的最大重试次数初值。 */
     int maxRetry() default 2;
