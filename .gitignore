@@ -1,6 +1,5 @@
 HELP.md
 target/
-.mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
 
@@ -42,11 +41,17 @@ build/
 ### ZCode 会话本地文件 ###
 .zcode/
 
-### 构建/打包产物（mvn package 输出 target/，CI 复制到 jar/，均不入库） ###
+### 构建/打包产物（target/ 不入库；jar/ 只由 master 入库供 CI 自动发布，其他分支忽略防误提交） ###
 jar/
 *.jar
 *.war
 *.class
+
+### Maven Wrapper 与本地工具配置（不入库，统一用 IDE 内置/系统 Maven） ###
+.mvn/
+mvnw
+mvnw.cmd
+.zcodeignore
 
 ### 本地临时文件与运行日志 ###
 .tmp/
