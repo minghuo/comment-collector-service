@@ -80,6 +80,14 @@ public class WechatCommentCrawlerProvider implements CommentProvider {
                     .build();
         }
         String normalized = url.startsWith("http://") ? url.replace("http://", "https://") : url;
+        try{
+            if(url.contains("target_url=")){
+                normalized = URLCodeUtil.getURLDecode(URLCodeUtil.getUrlParamsValue(url, "target_url"));
+            }
+        }catch (Exception e){
+            log.error("[wechat-sy] 文章评论采集: url={}", url, e);
+        }
+
         log.info("[wechat-sy] 文章评论采集: url={} commentId={} buffer={}", normalized, commentId, buffer);
 
         String base = SyConstants.getBaseUrl() + COMMENT_URL + "?url=" + URLCodeUtil.getURLEncode(normalized);
