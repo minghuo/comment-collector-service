@@ -37,6 +37,7 @@ public final class PlatformCursorKeys {
     private static final PagingMode CURSOR_CURSOR = new PagingMode(Type.CURSOR, "cursor");
     private static final PagingMode CURSOR_BUFFER = new PagingMode(Type.CURSOR, "buffer");
     private static final PagingMode CURSOR_LAST_ID = new PagingMode(Type.CURSOR, "lastId");
+    private static final PagingMode CURSOR_MAX_BEHOT_TIME = new PagingMode(Type.CURSOR, "maxBehotTime");
     private static final PagingMode PAGE = new PagingMode(Type.PAGE_INCREMENT, "page");
 
     /** 键小写化，兼容配置里 weibo/WEibo 等写法。 */
@@ -49,6 +50,8 @@ public final class PlatformCursorKeys {
             Map.entry("wechat_video:comment", CURSOR_BUFFER),
             Map.entry("douyin:comment", PAGE),
             Map.entry("toutiao:comment", PAGE),
+            // 账号历史（非评论）：头条用户主页时间流用 max_behot_time 游标
+            Map.entry("toutiao:account_history", CURSOR_MAX_BEHOT_TIME),
             // 社区类平台（阶段：多平台补充）
             Map.entry("tieba:comment", PAGE),              // 页码分页（主列表/楼中楼均页码）
             Map.entry("honor_bbs:comment", PAGE),          // 页码分页（Discuz 超页钳制，无子回复接口）

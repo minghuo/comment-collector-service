@@ -1,6 +1,7 @@
 package com.sysj.collector.model;
 
 
+import com.sysj.collector.core.pipeline.PipelineRequest;
 import lombok.Builder;
 import lombok.Data;
 import java.util.List;
@@ -8,9 +9,15 @@ import java.util.Map;
 
 // ── 采集请求 ──────────────────────────────────────────────────────────────
 
+/**
+ * 评论采集请求。
+ *
+ * <p>实现 {@link PipelineRequest} 后可直接进入统一调用管线（平台码/功能码是管线唯一依赖的两个字段），
+ * 与账号历史等其它功能共用同一条 Bulkhead → 熔断 → 限流 → 重试 → 限时链。
+ */
 @Data
 @Builder
-public class CommentCollectRequest {
+public class CommentCollectRequest implements PipelineRequest {
 
     /** 平台编码，如 weibo / douyin / wechat / xiaohongshu */
     private String platformCode;

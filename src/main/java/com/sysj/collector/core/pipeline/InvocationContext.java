@@ -1,7 +1,6 @@
 package com.sysj.collector.core.pipeline;
 
 import com.sysj.collector.domain.document.PlatformFeatureConfig.ProviderConfig;
-import com.sysj.collector.model.CommentCollectRequest;
 
 /**
  * 一次供应商调用的不可变上下文（§8.1/§9.2）。
@@ -17,7 +16,7 @@ import com.sysj.collector.model.CommentCollectRequest;
  *   <li>{@code maxRetry} = 额外重试次数（0 = 只调用一次），来自 {@code providers[].max_retry}。</li>
  * </ul>
  *
- * @param request         原始采集请求（供应商实现需要它）
+ * @param request         原始请求（供应商实现需要它；只要求实现 {@link PipelineRequest}）
  * @param platformCode    平台码
  * @param featureCode     功能码
  * @param provider        该供应商的 DB 配置（速率、重试、并发、超时、流控效果都在这里）
@@ -26,7 +25,7 @@ import com.sysj.collector.model.CommentCollectRequest;
  * @param maxRetry        额外重试次数
  */
 public record InvocationContext(
-        CommentCollectRequest request,
+        PipelineRequest request,
         String platformCode,
         String featureCode,
         ProviderConfig provider,

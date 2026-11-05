@@ -15,7 +15,7 @@ import java.util.function.DoubleSupplier;
  *
  * <h3>不可随意改动的常量</h3>
  * <ul>
- *   <li>{@link #ALPHABETS}：只可 reachable 两个字母表（s3 绕 UA、s4 编最终密文），大小写敏感；</li>
+ *   <li> ：只可 reachable 两个字母表（s3 绕 UA、s4 编最终密文），大小写敏感；</li>
  *   <li>{@link #SALT}：追加在 query/body 之后参与摘要；</li>
  *   <li>{@link #FIELD_ORDER}：50 个标量写进 body 的固定置换，顺序即算法；</li>
  *   <li>{@link #PAGE_ID}/{@link #AID}：抖音页面自己的标识，与 query 里的 aid 必须一致；</li>

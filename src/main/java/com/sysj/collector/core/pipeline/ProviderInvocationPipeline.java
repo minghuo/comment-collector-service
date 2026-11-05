@@ -117,6 +117,24 @@ public class ProviderInvocationPipeline {
      * @throws ProviderInvocationException 任一阶段拒绝或调用失败
      */
     public CommonEntity<Comment> invoke(CommentCollectRequest request, ProviderConfig provider, CommentProvider impl) {
+        return invoke(request, provider, () -> impl.fetchComments(request));
+    }
+
+    /**
+     * 通用调用入口：任意功能（评论、账号历史，以及后续互动更新等）共用同一条管线。
+     *
+     * <p>与评论入口的唯一差别是"谁来发起调用"：评论入口把 {@link CommentProvider#fetchComments} 包成
+     * {@link Supplier}，账号历史把 {@code AccountHistoryProvider#fetchHistory} 包成 {@link Supplier}，
+     * 之后的 Bulkhead/熔断/限流/重试/限时、成败判定与运行时状态上报**完全一致**，
+     * 不会出现"新功能自己写一套重试"的漂移。
+     *
+     * @param request  请求（只要求实现 {@link PipelineRequest}，提供平台码/功能码）
+     * @param provider 该供应商的 DB 配置
+     * @param call     真正触达供应商的调用（每次重试都会重新执行）
+     * @return 供应商返回的原始结果（已通过统一成败判定）
+     * @throws ProviderInvocationException 任一阶段拒绝或调用失败
+     */
+    public <T> T invoke(PipelineRequest request, ProviderConfig provider, Supplier<T> call) {
         InvocationContext ctx = newContext(request, provider);
         long started = System.nanoTime();
         boolean success = false;
@@ -125,9 +143,9 @@ public class ProviderInvocationPipeline {
         // -1 = 还没回填（例如超时后被取消，供应商线程来不及写）；0 = 真的亚毫秒
         AtomicLong providerLatencyMs = new AtomicLong(-1L);
         try {
-            CommonEntity<Comment> entity = enabled()
-                    ? runChain(ctx, () -> attempt(ctx, impl, request, attempted, providerLatencyMs))
-                    : attempt(ctx, impl, request, attempted, providerLatencyMs);
+            T entity = enabled()
+                    ? runChain(ctx, () -> attempt(ctx, call, attempted, providerLatencyMs))
+                    : attempt(ctx, call, attempted, providerLatencyMs);
             success = true;
             return entity;
         } finally {
@@ -159,14 +177,13 @@ public class ProviderInvocationPipeline {
      * <p>代价：确定性的业务失败（例如"链接不支持"）也会被重试 {@code max_retry} 次。
      * 调参建议见文档 §9.5：对失败多为确定性的供应商，把 {@code max_retry} 配小或配 0。
      */
-    private CommonEntity<Comment> attempt(InvocationContext ctx, CommentProvider impl,
-                                          CommentCollectRequest request, AtomicBoolean attempted,
-                                          AtomicLong providerLatencyMs) {
+    private <T> T attempt(InvocationContext ctx, Supplier<T> call, AtomicBoolean attempted,
+                          AtomicLong providerLatencyMs) {
         attempted.set(true);
         long started = System.nanoTime();
-        CommonEntity<Comment> entity;
+        T entity;
         try {
-            entity = impl.fetchComments(request);
+            entity = call.get();
         } finally {
             // 只计"真正打到供应商"的那一段（供应商内部的重试与翻页都算在内），
             // 不含外层的排队、限流等待与退避 sleep
@@ -182,7 +199,7 @@ public class ProviderInvocationPipeline {
      * <p>解析口径与 §9.5 一致：{@code providers[].timeout_ms} 优先，缺失取全局；
      * {@code max_concurrency} 同理，且 {@code 0} 被当作"不限"而不是"默认值"（可显式关掉 Bulkhead）。
      */
-    public InvocationContext newContext(CommentCollectRequest request, ProviderConfig provider) {
+    public InvocationContext newContext(PipelineRequest request, ProviderConfig provider) {
         Long configuredTimeout = provider.getTimeoutMs();
         long timeout = configuredTimeout != null ? configuredTimeout : defaultTimeoutMs();
         Integer configuredConcurrency = provider.getMaxConcurrency();
@@ -213,10 +230,18 @@ public class ProviderInvocationPipeline {
      * {@link NonRetryableProviderException}，由 {@code RetryStage} 直接上抛、不占重试次数、
      * 不重复消耗供应商 DPS 配额。
      */
-    private void validate(InvocationContext ctx, CommonEntity<Comment> entity) {
-        if (entity == null) {
+    /**
+     * 统一的结果判定。评论与账号历史等不同功能共用同一条链，因此只依赖
+     * {@link CommonEntity} 的公共语义；非 CommonEntity 视为供应商实现错误。
+     */
+    private void validate(InvocationContext ctx, Object result) {
+        if (result == null) {
             throw new ProviderInvocationException(ctx.providerKey(),
                     "供应商 [" + ctx.providerKey() + "] 返回 null");
+        }
+        if (!(result instanceof CommonEntity<?> entity)) {
+            throw new ProviderInvocationException(ctx.providerKey(),
+                    "供应商 [" + ctx.providerKey() + "] 返回类型非法: " + result.getClass().getName());
         }
         if (entity.getStatus() != CommonStatusEnum.STATUS_SUCCESS) {
             String detail = "供应商 [" + ctx.providerKey() + "] 返回失败状态: " + entity.getStatus()

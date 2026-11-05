@@ -6,6 +6,9 @@ import com.sysj.collector.domain.document.SubTask;
 import com.sysj.collector.domain.document.TaskStatuses;
 import com.sysj.collector.domain.service.SystemConfigService;
 import com.sysj.collector.metrics.TaskMetrics;
+import com.sysj.collector.core.provider.support.AccountHistoryKeys;
+import com.sysj.collector.model.AccountHistoryCollectRequest;
+import com.sysj.collector.model.AccountHistoryCollectResult;
 import com.sysj.collector.model.CommentCollectRequest;
 import com.sysj.collector.model.CommentCollectResult;
 import com.sysj.collector.model.QueuedTask;
@@ -88,6 +91,7 @@ public class AsyncTaskConsumer {
 
     private final RedisTaskStream taskStream;
     private final CommentCollectionFacade facade;
+    private final AccountHistoryFacade accountHistoryFacade;
     private final TaskResultListener taskResultListener;
     private final SubTaskDao subTaskDao;
     private final TaskMetrics taskMetrics;
@@ -100,6 +104,7 @@ public class AsyncTaskConsumer {
 
     public AsyncTaskConsumer(RedisTaskStream taskStream,
                              CommentCollectionFacade facade,
+                             AccountHistoryFacade accountHistoryFacade,
                              TaskResultListener taskResultListener,
                              SubTaskDao subTaskDao,
                              TaskMetrics taskMetrics,
@@ -107,6 +112,7 @@ public class AsyncTaskConsumer {
                              RedisHealthMonitor redisHealth) {
         this.taskStream = taskStream;
         this.facade = facade;
+        this.accountHistoryFacade = accountHistoryFacade;
         this.taskResultListener = taskResultListener;
         this.subTaskDao = subTaskDao;
         this.taskMetrics = taskMetrics;
@@ -320,6 +326,12 @@ public class AsyncTaskConsumer {
      * @throws Exception 结果回写失败（调用方决定重投策略；执行异常已收敛为 error 参数）
      */
     private void executeAndReport(CommentCollectRequest request) throws Exception {
+        // 账号历史与评论共用 master_task/sub_task 与结果回写契约，按 featureCode 分流执行体；
+        // 回写与指标统计保持完全一致的语义，避免两条链路的状态机/计数出现分叉。
+        if (AccountHistoryKeys.isAccountHistory(request.getFeatureCode())) {
+            executeAccountHistoryAndReport(request);
+            return;
+        }
         CommentCollectResult result = null;
         Throwable error = null;
         try {
@@ -328,6 +340,31 @@ public class AsyncTaskConsumer {
             error = e;
             log.error("异步采集执行异常: subTaskId={} error={}", request.getSubTaskId(), e.getMessage(), e);
         }
+        taskResultListener.onSubTaskOutcome(request, result, error);
+        if (result != null && result.isSuccess()) {
+            taskMetrics.recordTaskCompleted();
+        } else {
+            taskMetrics.recordTaskFailed();
+        }
+    }
+
+    /**
+     * 账号历史分支：执行一页账号历史采集并回写结果。
+     *
+     * <p>结果在回写前统一转成 {@link CommentCollectResult}——子任务状态机、翻页续采、
+     * 主任务计数与业务回调都只认这一个契约，账号历史不需要复制它们。
+     */
+    private void executeAccountHistoryAndReport(CommentCollectRequest request) throws Exception {
+        AccountHistoryCollectResult historyResult = null;
+        Throwable error = null;
+        try {
+            historyResult = accountHistoryFacade.doCollect(AccountHistoryCollectRequest.from(request));
+        } catch (Exception e) {
+            error = e;
+            log.error("异步账号历史采集执行异常: subTaskId={} feature={} error={}",
+                    request.getSubTaskId(), request.getFeatureCode(), e.getMessage(), e);
+        }
+        CommentCollectResult result = historyResult == null ? null : historyResult.toCommentCollectResult();
         taskResultListener.onSubTaskOutcome(request, result, error);
         if (result != null && result.isSuccess()) {
             taskMetrics.recordTaskCompleted();

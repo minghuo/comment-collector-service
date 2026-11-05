@@ -1,5 +1,6 @@
 package com.sysj.collector.domain.service;
 
+import com.sysj.collector.core.provider.AccountHistoryProvider;
 import com.sysj.collector.core.provider.CommentProvider;
 import com.sysj.collector.core.provider.ProviderCapability;
 import com.sysj.collector.core.provider.ProviderMeta;
@@ -59,17 +60,25 @@ public class SupplierRegistrySyncService {
     private final com.sysj.collector.domain.service.ProviderConfigService configService;
     /** 全部供应商实现（Spring 注入；@ProviderMeta 声明注册元数据）。 */
     private final List<CommentProvider> codeProviders;
+    /**
+     * 账号历史供应商（独立契约，不属于 {@link CommentProvider}）。
+     * 与评论供应商共用同一张 {@code platform_feature_config}，因此也必须参与代码注册，
+     * 否则新增平台账号历史后仍要手工往库里补配置。
+     */
+    private final List<AccountHistoryProvider> accountHistoryProviders;
 
     public SupplierRegistrySyncService(PlatformFeatureConfigDao featureConfigDao,
                                        SupplierStateDao supplierStateDao,
                                        UserTierConfigDao userTierConfigDao,
                                        ProviderConfigService configService,
-                                       List<CommentProvider> codeProviders) {
+                                       List<CommentProvider> codeProviders,
+                                       List<AccountHistoryProvider> accountHistoryProviders) {
         this.featureConfigDao = featureConfigDao;
         this.supplierStateDao = supplierStateDao;
         this.userTierConfigDao = userTierConfigDao;
         this.configService = configService;
         this.codeProviders = codeProviders == null ? List.of() : codeProviders;
+        this.accountHistoryProviders = accountHistoryProviders == null ? List.of() : accountHistoryProviders;
     }
 
     /** 同步结果报告。 */
@@ -162,42 +171,53 @@ public class SupplierRegistrySyncService {
      * @return [新增条目数, 能力对齐条目数]
      */
     private int[] registerCodeProviders() {
-        int added = 0;
-        int aligned = 0;
+        int[] counters = new int[]{0, 0};
         for (CommentProvider provider : codeProviders) {
-            ProviderMeta meta = AnnotationUtils.findAnnotation(provider.getClass(), ProviderMeta.class);
-            if (meta == null) {
-                log.warn("供应商未标注 @ProviderMeta，跳过自动注册（需手工维护 platform_feature_config）: key={}",
-                        provider.providerKey());
-                continue;
-            }
-            PlatformFeatureConfig.ProviderConfig config = buildProviderConfig(meta, provider);
-            try {
-                String result = featureConfigDao.upsertProvider(
-                        meta.platform(), meta.feature(), meta.featureName(), config);
-                switch (result) {
-                    case "CREATED_FEATURE", "ADDED" -> {
-                        added++;
-                        log.info("代码注册供应商入库: {} → {}/{} ({})", provider.providerKey(),
-                                meta.platform(), meta.feature(), result);
-                    }
-                    case "ALIGNED" -> aligned++;
-                    default -> log.debug("供应商配置已存在且能力一致: key={}", provider.providerKey());
-                }
-                // 能力对齐/条目新增都淘汰该功能配置缓存，60s 内生效
-                configService.evictFeatureCache(meta.platform(), meta.feature());
-            } catch (Exception e) {
-                log.warn("代码注册供应商失败(跳过): key={} error={}", provider.providerKey(), e.getMessage());
-            }
+            registerOne(provider, provider.providerKey(), counters);
         }
-        return new int[]{added, aligned};
+        for (AccountHistoryProvider provider : accountHistoryProviders) {
+            registerOne(provider, provider.providerKey(), counters);
+        }
+        return counters;
+    }
+
+    /**
+     * 注册单个供应商（评论与账号历史共用）：读 {@code @ProviderMeta} → upsert → 淘汰缓存。
+     *
+     * @param counters [新增条目数, 能力对齐条目数]，原地累加
+     */
+    private void registerOne(Object provider, String providerKey, int[] counters) {
+        ProviderMeta meta = AnnotationUtils.findAnnotation(provider.getClass(), ProviderMeta.class);
+        if (meta == null) {
+            log.warn("供应商未标注 @ProviderMeta，跳过自动注册（需手工维护 platform_feature_config）: key={}",
+                    providerKey);
+            return;
+        }
+        PlatformFeatureConfig.ProviderConfig config = buildProviderConfig(meta, provider, providerKey);
+        try {
+            String result = featureConfigDao.upsertProvider(
+                    meta.platform(), meta.feature(), meta.featureName(), config);
+            switch (result) {
+                case "CREATED_FEATURE", "ADDED" -> {
+                    counters[0]++;
+                    log.info("代码注册供应商入库: {} → {}/{} ({})", providerKey,
+                            meta.platform(), meta.feature(), result);
+                }
+                case "ALIGNED" -> counters[1]++;
+                default -> log.debug("供应商配置已存在且能力一致: key={}", providerKey);
+            }
+            // 能力对齐/条目新增都淘汰该功能配置缓存，60s 内生效
+            configService.evictFeatureCache(meta.platform(), meta.feature());
+        } catch (Exception e) {
+            log.warn("代码注册供应商失败(跳过): key={} error={}", providerKey, e.getMessage());
+        }
     }
 
     /** 由注解构造配置数组元素（能力取实现类 @ProviderCapability 的代码声明）。 */
     private static PlatformFeatureConfig.ProviderConfig buildProviderConfig(
-            ProviderMeta meta, CommentProvider provider) {
+            ProviderMeta meta, Object provider, String providerKey) {
         PlatformFeatureConfig.ProviderConfig config = new PlatformFeatureConfig.ProviderConfig();
-        config.setProviderKey(provider.providerKey());
+        config.setProviderKey(providerKey);
         config.setName(meta.name());
         config.setRatePerSecond(meta.ratePerSecond());
         config.setMaxRetry(meta.maxRetry());

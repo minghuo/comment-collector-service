@@ -32,6 +32,7 @@
  *     bilibili_golaxy / bilibili_local / douyin_golaxy / douyin_local / xhs_golaxy / toutiao_local
  *     weibo_official / weibo_local / weibo_repost_local
  *     wechat_sy / wechat_video_sy
+ *     账号历史（AccountHistoryProvider）：toutiao_account_history
  *   写错会导致该供应商"Bean 未找到"而被静默跳过。
  */
 
@@ -144,6 +145,14 @@ const FEATURE_CONFIGS = [
     feature_name: '今日头条评论采集',
     providers: [
       { provider_key: 'toutiao_local', name: '今日头条-本地爬虫', rate_per_second: 0.5, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, capabilities: ['COMMENT','SUB_COMMENT','PAGE_PAGING','PROXY','SYNC_SUPPORTED'] },
+    ],
+  },
+  {
+    platform_code: 'toutiao',
+    feature_code: 'account_history',
+    feature_name: '今日头条账号历史',
+    providers: [
+      { provider_key: 'toutiao_account_history', name: '今日头条-账号历史', rate_per_second: 0.3, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['PAGE_PAGING','PROXY'] },
     ],
   },
   {

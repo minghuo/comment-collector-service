@@ -85,7 +85,7 @@ class ProviderAutoRegistrationTest {
 
         SupplierRegistrySyncService service = new SupplierRegistrySyncService(
                 featureConfigDao, supplierStateDao, userTierConfigDao, configService,
-                List.of(new VivoStubProvider(), new LegacyStubProvider()));
+                List.of(new VivoStubProvider(), new LegacyStubProvider()), List.of());
         SupplierRegistrySyncService.SyncReport report = service.sync();
 
         // 上报注解的供应商被注册（平台/功能/名称逐参数对齐）
@@ -118,7 +118,7 @@ class ProviderAutoRegistrationTest {
 
         SupplierRegistrySyncService service = new SupplierRegistrySyncService(
                 featureConfigDao, supplierStateDao, userTierConfigDao, configService,
-                List.of(new VivoStubProvider()));
+                List.of(new VivoStubProvider()), List.of());
         SupplierRegistrySyncService.SyncReport report = service.sync();
 
         assertEquals(0, report.providersRegistered());
@@ -148,7 +148,7 @@ class ProviderAutoRegistrationTest {
 
         SupplierRegistrySyncService service = new SupplierRegistrySyncService(
                 featureConfigDao, supplierStateDao, userTierConfigDao, configService,
-                List.of(new VivoStubProvider()));
+                List.of(new VivoStubProvider()), List.of());
         SupplierRegistrySyncService.SyncReport report = service.sync();
 
         verify(supplierStateDao).upsertIdentity(
@@ -172,7 +172,7 @@ class ProviderAutoRegistrationTest {
         when(userTierConfigDao.findAllOrderByPriority()).thenReturn(List.of());
 
         SupplierRegistrySyncService service = new SupplierRegistrySyncService(
-                featureConfigDao, supplierStateDao, userTierConfigDao, configService, List.of());
+                featureConfigDao, supplierStateDao, userTierConfigDao, configService, List.of(), List.of());
         SupplierRegistrySyncService.SyncReport report = service.sync();
 
         assertEquals(1, report.staleKeys().size());

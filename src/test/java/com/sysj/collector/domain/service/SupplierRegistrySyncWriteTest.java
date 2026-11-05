@@ -78,7 +78,7 @@ class SupplierRegistrySyncWriteTest {
     void setUp() {
         service = new SupplierRegistrySyncService(featureConfigDao, supplierStateDao, userTierConfigDao,
                 org.mockito.Mockito.mock(com.sysj.collector.domain.service.ProviderConfigService.class),
-                List.of());
+                List.of(), List.of());
     }
 
     @Test
