@@ -52,6 +52,8 @@ public final class PlatformCursorKeys {
             Map.entry("toutiao:comment", PAGE),
             // 账号历史（非评论）：头条用户主页时间流用 max_behot_time 游标
             Map.entry("toutiao:account_history", CURSOR_MAX_BEHOT_TIME),
+            // 账号历史：小红书 user_posted 用 opaque cursor
+            Map.entry("xhs:account_history", CURSOR_CURSOR),
             // 社区类平台（阶段：多平台补充）
             Map.entry("tieba:comment", PAGE),              // 页码分页（主列表/楼中楼均页码）
             Map.entry("honor_bbs:comment", PAGE),          // 页码分页（Discuz 超页钳制，无子回复接口）

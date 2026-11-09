@@ -81,6 +81,56 @@ public class AccountHistoryItem {
     private java.util.Map<String, Object> extra;
 
     /**
+     * 由小红书用户作品流（{@code /api/sns/web/v1/user_posted}）的单条 JSON 构造条目。
+     *
+     * <p>{@code user_posted} 的 {@code $.data.notes[]} 每项是
+     * {@code {id, note_card:{...}, xsec_token}}，正文、封面、作者、互动数都在
+     * {@code note_card} 下；部分版本也会把字段平铺到顶层，因此按"卡片优先、顶层回退"取值。
+     *
+     * <p>{@code xsec_token} 是详情页链接的必需参数（不带会 404/空数据），单独放
+     * {@link #extra} 的 {@code xsecToken}，由上层拼链接时决定是否附加。
+     */
+    public static AccountHistoryItem buildFromXhs(String dataStr) {
+        String itemId = firstNonBlank(dataStr, "$.id", "$.note_id", "$.note_card.note_id");
+        return AccountHistoryItem.builder()
+                .itemId(itemId)
+                .accountId(firstNonBlank(dataStr, "$.note_card.user.user_id", "$.user.user_id"))
+                .accountName(firstNonBlank(dataStr, "$.note_card.user.nickname", "$.user.nickname"))
+                .title(firstNonBlank(dataStr, "$.note_card.display_title", "$.display_title",
+                        "$.note_card.title", "$.title"))
+                .summary(firstNonBlank(dataStr, "$.note_card.desc", "$.desc",
+                        "$.note_card.summary", "$.summary"))
+                .url(itemId == null ? null : "https://www.xiaohongshu.com/explore/" + itemId)
+                .coverUrl(firstNonBlank(dataStr, "$.note_card.cover.url_default", "$.note_card.cover.url",
+                        "$.cover.url_default", "$.cover.url"))
+                .itemType(xhsItemType(dataStr))
+                .publishTime(epochMillis(firstNonBlank(dataStr, "$.note_card.time", "$.time",
+                        "$.note_card.create_time")))
+                .commentCount(longOrNull(firstNonBlank(dataStr, "$.note_card.interact_info.comment_count")))
+                .diggCount(longOrNull(firstNonBlank(dataStr, "$.note_card.interact_info.liked_count")))
+                .repostCount(longOrNull(firstNonBlank(dataStr, "$.note_card.interact_info.share_count")))
+                .insertTime(System.currentTimeMillis())
+                .extra(xhsExtra(dataStr))
+                .build();
+    }
+
+    /** {@code note_card.type=video} 归一为 video，其余（normal/图文）归一为 note。 */
+    static String xhsItemType(String dataStr) {
+        String type = firstNonBlank(dataStr, "$.note_card.type", "$.type");
+        return type != null && type.toLowerCase().contains("video") ? "video" : "note";
+    }
+
+    private static java.util.Map<String, Object> xhsExtra(String dataStr) {
+        String xsecToken = firstNonBlank(dataStr, "$.xsec_token", "$.note_card.xsec_token");
+        if (xsecToken == null) {
+            return null;
+        }
+        java.util.Map<String, Object> extra = new java.util.LinkedHashMap<>();
+        extra.put("xsecToken", xsecToken);
+        return extra;
+    }
+
+    /**
      * 由头条用户作品流的一屏 JSON 元素构造条目。
      *
      * <p>头条不同入口返回的字段名不一致（PC 用户流用 {@code group_id/publish_time}，

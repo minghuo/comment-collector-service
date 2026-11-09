@@ -618,6 +618,47 @@ public class Comment {
     }
 
     /**
+     * 从小红书 web 评论接口（{@code /api/sns/web/v2/comment/page}）返回的单条 JSON 构建 Comment。
+     *
+     * <p>字段映射以真实响应为准：
+     * <ul>
+     *   <li>{@code create_time} 是<b>毫秒</b>时间戳（与抖音的秒级不同，不要再 ×1000）；</li>
+     *   <li>{@code mid} 取笔记 {@code note_id}，落库业务主键 {@code taskId-{note_id}-{comment_id}}
+     *       依赖它，缺失会让不同任务的评论互相覆盖；</li>
+     *   <li>二级评论在响应里是 {@code sub_comments} 数组，父 id 以调用方上下文为准，
+     *       响应内的 {@code target_comment.id} 只作回退；</li>
+     *   <li>小红书特有维度（笔记 id、二级评论数）放 {@link #extra}。</li>
+     * </ul>
+     *
+     * @param dataStr         单条评论 JSON（{@code $.data.comments[]} 的一个元素）
+     * @param noteId          笔记 id（写入 {@code mid}）
+     * @param parentCommentId 父评论 id；主评论传 null
+     */
+    public static Comment buildFromXhsLocal(String dataStr, String noteId, String parentCommentId) {
+        Long timeLong = CommonTools.stringToLong(CommonParser.getJsonPathOne(dataStr, "$.create_time"));
+        Map<String, Object> extra = new HashMap<>();
+        extra.put("note_id", noteId);
+        extra.put("sub_comment_count",
+                CommonTools.stringToInteger(CommonParser.getJsonPathOne(dataStr, "$.sub_comment_count")));
+        return Comment.builder()
+                .commentId(CommonParser.getJsonPathOne(dataStr, "$.id"))
+                .parentCommentId(StringUtils.isNotBlank(parentCommentId) ? parentCommentId
+                        : CommonParser.getJsonPathOne(dataStr, "$.target_comment.id"))
+                .mid(noteId)
+                .uid(CommonParser.getJsonPathOne(dataStr, "$.user_info.user_id"))
+                .userName(CommonParser.getJsonPathOne(dataStr, "$.user_info.nickname"))
+                .text(CommonParser.getJsonPathOne(dataStr, "$.content"))
+                .time(timeLong != null && timeLong > 0
+                        ? TimeParser.dateFormatString(new Date(timeLong)) : null)
+                .likeCount(CommonTools.stringToInteger(CommonParser.getJsonPathOne(dataStr, "$.like_count")))
+                .replyCount(CommonTools.stringToInteger(CommonParser.getJsonPathOne(dataStr, "$.sub_comment_count")))
+                .ipLocation(CommonParser.getJsonPathOne(dataStr, "$.ip_location"))
+                .extra(extra)
+                .insertTime(System.currentTimeMillis())
+                .build();
+    }
+
+    /**
      * 从今日头条评论接口返回的单条 JSON 构建 Comment。
      *
      * <p>字段映射与 auto-task-web 的 {@code TtComment.build} 一致。

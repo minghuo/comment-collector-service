@@ -32,7 +32,7 @@ import java.util.regex.Pattern;
  *
  * <h3>接口</h3>
  * <pre>
- * GET https://www.toutiao.com/api/pc/list/user/feed
+ * GET <a href="https://www.toutiao.com/api/pc/list/user/feed">...</a>
  *     ?category=pc_profile_ugc&amp;token={userToken}&amp;max_behot_time={cursor}
  *     &amp;count={count}&amp;aid=24&amp;app_name=toutiao_web
  * </pre>
@@ -187,7 +187,7 @@ public class TouTiaoAccountHistoryProvider implements AccountHistoryProvider {
             return tmp;
         }
         if (items != null && !items.isEmpty()) {
-            AccountHistoryItem last = items.get(items.size() - 1);
+            AccountHistoryItem last = items.getLast();
             if (last.getPublishTime() != null) {
                 return String.valueOf(last.getPublishTime() / 1000L);
             }
@@ -235,6 +235,6 @@ public class TouTiaoAccountHistoryProvider implements AccountHistoryProvider {
 
     private static int clampCount(AccountHistoryCollectRequest request) {
         int count = request.resolveMaxCount(DEFAULT_PAGE_SIZE);
-        return Math.min(Math.max(count, 1), MAX_PAGE_SIZE);
+        return Math.clamp(count, 1, MAX_PAGE_SIZE);
     }
 }

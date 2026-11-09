@@ -29,10 +29,10 @@
  * ⚠️ provider_key 必须与 Spring Bean 名称完全一致
  *   应用通过 ApplicationContext.getBean(providerKey, CommentProvider.class) 取实现类。
  *   当前已注册的 Bean 名称（来自 @Component 注解）：
- *     bilibili_golaxy / bilibili_local / douyin_golaxy / douyin_local / xhs_golaxy / toutiao_local
+ *     bilibili_golaxy / bilibili_local / douyin_golaxy / douyin_local / xhs_golaxy / xhs_local / toutiao_local
  *     weibo_official / weibo_local / weibo_repost_local
  *     wechat_sy / wechat_video_sy
- *     账号历史（AccountHistoryProvider）：toutiao_account_history
+ *     账号历史（AccountHistoryProvider）：toutiao_account_history / xhs_account_history
  *   写错会导致该供应商"Bean 未找到"而被静默跳过。
  */
 
@@ -137,6 +137,19 @@ const FEATURE_CONFIGS = [
     feature_name: '小红书评论采集',
     providers: [
       { provider_key: 'xhs_golaxy', name: '小红书-中科天玑接口', rate_per_second: 1.0, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 4, timeout_ms: 15000, capabilities: ['COMMENT','SUB_COMMENT','CURSOR_PAGING','SYNC_SUPPORTED'] },
+      // 小红书 web 本地爬虫：纯算 x-s（XYS_/XYW_），需要在 requestParams.extra 里传 cookie（至少 a1）
+      // 数据类接口（user_posted）必须 XYW_；评论 page 两种都可用，默认也走 XYW_ 对齐新版
+      // THROTTLE_QUEUE：自动翻页页间密集，REJECT 会立即失败并计入熔断（与抖音/微博/B站本地一致）
+      { provider_key: 'xhs_local', name: '小红书-本地爬虫', rate_per_second: 0.5, max_retry: 3, priority: 20, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['COMMENT','CURSOR_PAGING','LOGIN_STATE','PROXY','SYNC_SUPPORTED'] },
+    ],
+  },
+  {
+    platform_code: 'xhs',
+    feature_code: 'account_history',
+    feature_name: '小红书账号历史',
+    providers: [
+      // user_posted 需要 xsec_token（用户主页链接 query）+ cookie；翻页 cursor 为 opaque 字符串
+      { provider_key: 'xhs_account_history', name: '小红书-账号历史', rate_per_second: 0.5, max_retry: 3, priority: 10, is_healthy: true, max_concurrency: 2, timeout_ms: 20000, flow_effect: 'THROTTLE_QUEUE', max_queue_wait_ms: 30000, capabilities: ['CURSOR_PAGING','LOGIN_STATE','PROXY','SYNC_SUPPORTED'] },
     ],
   },
   {

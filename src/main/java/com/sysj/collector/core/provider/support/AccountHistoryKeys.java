@@ -24,6 +24,15 @@ public final class AccountHistoryKeys {
     /** 头条账号主页链接中的 token 段（{@code /c/user/token/xxxx/}）。 */
     public static final String TOUTIAO_USER_TOKEN = "userToken";
 
+    /** extra：小红书 user_posted 的翻页游标（上一页 {@code $.data.cursor}）。 */
+    public static final String XHS_CURSOR = "cursor";
+
+    /** extra：小红书 user_posted 必需的 xsec_token（用户主页链接里的 query 参数）。 */
+    public static final String XHS_XSEC_TOKEN = "xsecToken";
+
+    /** extra：xsec_token 来源标识，主页链接用 {@code pc_user}，搜索进入用 {@code pc_search}。 */
+    public static final String XHS_XSEC_SOURCE = "xsecSource";
+
     public static boolean isAccountHistory(String featureCode) {
         return FEATURE_CODE.equalsIgnoreCase(featureCode == null ? null : featureCode.trim());
     }
